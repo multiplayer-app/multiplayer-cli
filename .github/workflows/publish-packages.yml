@@ -37,74 +37,8 @@ jobs:
         with:
           path: "**/node_modules"
           key: node-modules-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - run: pnpm turbo lint
-
-  # version:
-  #   name: Version
-  #   needs: lint
-  #   runs-on: ubuntu-latest
-  #   permissions:
-  #     contents: write
-  #   outputs:
-  #     version: ${{ steps.get_version.outputs.version }}
-  #     sha: ${{ steps.commit.outputs.sha }}
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         fetch-depth: 0
-  #         token: ${{ secrets.GITHUB_TOKEN }}
-  #     - uses: pnpm/action-setup@v4
-  #       with:
-  #         version: ${{ env.PNPM_VERSION }}
-  #     - uses: actions/setup-node@v4
-  #       with:
-  #         node-version: ${{ env.NODE_VERSION }}
-  #     - name: Cache pnpm store
-  #       uses: actions/cache@v4
-  #       with:
-  #         path: ~/.local/share/pnpm/store
-  #         key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-  #         restore-keys: pnpm-store-${{ runner.os }}-
-  #     - name: Cache node_modules
-  #       uses: actions/cache@v4
-  #       with:
-  #         path: "**/node_modules"
-  #         key: node-modules-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-  #     - run: pnpm install --no-frozen-lockfile --ignore-scripts
-  #     - id: get_version
-  #       run: |
-  #         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-  #           echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-  #         else
-  #           echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-  #         fi
-  #     - name: Set package version from tag
-  #       run: |
-  #         node -e "
-  #           const fs = require('fs');
-  #           const version = '${{ steps.get_version.outputs.version }}';
-  #           const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-  #           pkg.version = version;
-  #           fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-  #         "
-  #     - name: Update lockfile
-  #       run: pnpm install --no-frozen-lockfile --ignore-scripts
-  #     - name: Commit version bump
-  #       id: commit
-  #       run: |
-  #         git config user.name "github-actions[bot]"
-  #         git config user.email "github-actions[bot]@users.noreply.github.com"
-  #         git add -A
-  #         git diff --staged --quiet || git commit -m "chore: version bump ${{ steps.get_version.outputs.version }} [skip ci]"
-  #         # Find the branch this tag was made from and push back to it
-  #         SOURCE_BRANCH=$(git branch -r --contains ${{ github.sha }} | grep -v 'HEAD' | head -1 | sed 's/.*origin\///' | xargs)
-  #         if [ -n "$SOURCE_BRANCH" ]; then
-  #           git push origin HEAD:refs/heads/$SOURCE_BRANCH
-  #         else
-  #           git push origin HEAD:refs/heads/main
-  #         fi
-  #         echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
   build-cli:
     name: Build CLI
@@ -112,8 +46,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.version.outputs.sha }}
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -132,7 +64,7 @@ jobs:
         with:
           path: "**/node_modules"
           key: node-modules-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - name: Build all platform binaries
         run: bun run scripts/build.ts
       - name: Upload binaries
@@ -147,12 +79,13 @@ jobs:
     needs: [build-cli]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: pnpm/action-setup@v4
         with:
           version: ${{ env.PNPM_VERSION }}
@@ -172,7 +105,7 @@ jobs:
         with:
           path: "**/node_modules"
           key: node-modules-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - name: Download CLI binaries
         uses: actions/download-artifact@v4
         with:
@@ -183,3 +116,12 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true
+      - name: Commit updated package.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git diff --staged --quiet && exit 0
+          git commit -m "chore: update optionalDependencies [skip ci]"
+          SOURCE_BRANCH=$(git branch -r --contains ${{ github.sha }} | grep -v 'HEAD' | head -1 | sed 's/.*origin\///' | xargs)
+          git push origin HEAD:refs/heads/${SOURCE_BRANCH:-main}
