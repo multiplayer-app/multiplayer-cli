@@ -104,6 +104,25 @@ importers:
       zod:
         specifier: ^4.3.6
         version: 4.4.3
+    optionalDependencies:
+      '@multiplayer-app/cli-darwin-arm64':
+        specifier: 2.0.80
+        version: 2.0.80
+      '@multiplayer-app/cli-darwin-x64':
+        specifier: 2.0.80
+        version: 2.0.80
+      '@multiplayer-app/cli-linux-arm64':
+        specifier: 2.0.80
+        version: 2.0.80
+      '@multiplayer-app/cli-linux-x64':
+        specifier: 2.0.80
+        version: 2.0.80
+      '@multiplayer-app/cli-windows-arm64':
+        specifier: 2.0.80
+        version: 2.0.80
+      '@multiplayer-app/cli-windows-x64':
+        specifier: 2.0.80
+        version: 2.0.80
 
 packages:
 
@@ -423,6 +442,42 @@ packages:
 
   '@mongodb-js/saslprep@1.4.11':
     resolution: {integrity: sha512-o9rAHc0IpIjuPSxRutWpE1F62x7n+4mVS4rCNHkzhIUMQcc18bb6xEq5wd2NdN0WjepIyXIppRshYI2kQDOZVA==}
+
+  '@multiplayer-app/cli-darwin-arm64@2.0.80':
+    resolution: {integrity: sha512-MXtMP1VpMWN4x4IvSEh6tfD0BWLwLpejjUON23Fe4Z+8a7W/KV/2/CO8BmWkjGwlaE9QX4HHsUUM90Eavv3LCA==}
+    cpu: [arm64]
+    os: [darwin]
+    hasBin: true
+
+  '@multiplayer-app/cli-darwin-x64@2.0.80':
+    resolution: {integrity: sha512-DSbTGQSc5G9UokwmldWlf6ALCBs9NMmd4aPh4LqUaXa5WzoOmEWdNCOPWRPcf+Mbe5hzmr5dcsmZsy1yn1LExQ==}
+    cpu: [x64]
+    os: [darwin]
+    hasBin: true
+
+  '@multiplayer-app/cli-linux-arm64@2.0.80':
+    resolution: {integrity: sha512-74ucDin0wfB8y45srtnfr/lICKZxPSR+QoW/ty0wk2OnAUfKpg2xOkAJuGEV9+ZAFCU9bX7Iy7EcFfEh79EgTg==}
+    cpu: [arm64]
+    os: [linux]
+    hasBin: true
+
+  '@multiplayer-app/cli-linux-x64@2.0.80':
+    resolution: {integrity: sha512-RydF8iuvLTadVpw2/GKRKhlDnE5n+BwwnBA6udACtKJglQjVQf/2DPxJEJ5mU5M99n7Cda8zy117FSdwO7QQZg==}
+    cpu: [x64]
+    os: [linux]
+    hasBin: true
+
+  '@multiplayer-app/cli-windows-arm64@2.0.80':
+    resolution: {integrity: sha512-nLWhyB2mJDcLMxfLkrSCs3FAbYR/IvfDZbk6fES+U+ppduGG3yFke5wIBAF6Yi8IyT4CGTHHimTdKE56ObMYvg==}
+    cpu: [arm64]
+    os: [win32]
+    hasBin: true
+
+  '@multiplayer-app/cli-windows-x64@2.0.80':
+    resolution: {integrity: sha512-iZS11zxe+LOz3+qWl+iD2fVVtPB3jGxPZTWrCHl9bCylSuNOfq0ZoSmEsGcw98U9Eu2w2gZ6ULrR8g4rLs4VBA==}
+    cpu: [x64]
+    os: [win32]
+    hasBin: true
 
   '@noble/hashes@1.8.0':
     resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
@@ -2097,6 +2152,24 @@ snapshots:
   '@mongodb-js/saslprep@1.4.11':
     dependencies:
       sparse-bitfield: 3.0.3
+
+  '@multiplayer-app/cli-darwin-arm64@2.0.80':
+    optional: true
+
+  '@multiplayer-app/cli-darwin-x64@2.0.80':
+    optional: true
+
+  '@multiplayer-app/cli-linux-arm64@2.0.80':
+    optional: true
+
+  '@multiplayer-app/cli-linux-x64@2.0.80':
+    optional: true
+
+  '@multiplayer-app/cli-windows-arm64@2.0.80':
+    optional: true
+
+  '@multiplayer-app/cli-windows-x64@2.0.80':
+    optional: true
 
   '@noble/hashes@1.8.0': {}
 

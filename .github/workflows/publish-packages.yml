@@ -71,7 +71,7 @@ jobs:
         with:
           path: "**/node_modules"
           key: node-modules-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - id: get_version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -86,9 +86,6 @@ jobs:
             const version = '${{ steps.get_version.outputs.version }}';
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
             pkg.version = version;
-            for (const k of Object.keys(pkg.optionalDependencies || {})) {
-              if (k.startsWith('@multiplayer-app/')) pkg.optionalDependencies[k] = version;
-            }
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
       - name: Update lockfile

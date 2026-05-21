@@ -47,6 +47,14 @@ for (const { dir, bin } of PLATFORMS) {
   await publish(pkgDir, `@multiplayer-app/cli-${dir}`)
 }
 
+// Update optionalDependencies to the current version now that platform packages are published
+const rootPkgPath = path.join(ROOT, 'package.json')
+const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, 'utf-8'))
+for (const k of Object.keys(rootPkg.optionalDependencies || {})) {
+  if (k.startsWith('@multiplayer-app/')) rootPkg.optionalDependencies[k] = pkg.version
+}
+fs.writeFileSync(rootPkgPath, JSON.stringify(rootPkg, null, 2) + '\n')
+
 // Then publish the main wrapper package (--ignore-scripts prevents recursive publish lifecycle hook)
 await publish(ROOT, '@multiplayer-app/cli', true)
 
