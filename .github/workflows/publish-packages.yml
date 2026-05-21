@@ -26,17 +26,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Cache pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/pnpm/store
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-store-${{ runner.os }}-
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: "**/node_modules"
-          key: node-modules-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          cache: pnpm
       - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - run: pnpm turbo lint
 
@@ -52,18 +42,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
       - uses: oven-sh/setup-bun@v2
-      - name: Cache pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/pnpm/store
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-store-${{ runner.os }}-
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: "**/node_modules"
-          key: node-modules-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
       - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - name: Build all platform binaries
         run: bun run scripts/build.ts
@@ -93,18 +73,8 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
+          cache: pnpm
       - uses: oven-sh/setup-bun@v2
-      - name: Cache pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/pnpm/store
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-store-${{ runner.os }}-
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: "**/node_modules"
-          key: node-modules-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
       - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - name: Download CLI binaries
         uses: actions/download-artifact@v4
