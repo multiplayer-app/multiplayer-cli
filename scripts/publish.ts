@@ -9,11 +9,11 @@ const prereleaseMatch = pkg.version?.match(/-([\w]+)(\.\d+)?$/)
 const distTag = prereleaseMatch ? prereleaseMatch[1] : 'latest'
 
 const PLATFORMS: { dir: string; bin: string }[] = [
-  { dir: 'darwin-arm64',  bin: 'multiplayer'     },
-  { dir: 'darwin-x64',    bin: 'multiplayer'     },
-  { dir: 'linux-x64',     bin: 'multiplayer'     },
-  { dir: 'linux-arm64',   bin: 'multiplayer'     },
-  { dir: 'windows-x64',   bin: 'multiplayer.exe' },
+  { dir: 'darwin-arm64', bin: 'multiplayer' },
+  { dir: 'darwin-x64', bin: 'multiplayer' },
+  { dir: 'linux-x64', bin: 'multiplayer' },
+  { dir: 'linux-arm64', bin: 'multiplayer' },
+  { dir: 'windows-x64', bin: 'multiplayer.exe' },
   { dir: 'windows-arm64', bin: 'multiplayer.exe' },
 ]
 
@@ -46,6 +46,14 @@ for (const { dir, bin } of PLATFORMS) {
   fs.chmodSync(path.join(pkgDir, 'bin', bin), 0o755)
   await publish(pkgDir, `@multiplayer-app/cli-${dir}`)
 }
+
+// Update optionalDependencies to the current version now that platform packages are published
+const rootPkgPath = path.join(ROOT, 'package.json')
+const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, 'utf-8'))
+for (const k of Object.keys(rootPkg.optionalDependencies || {})) {
+  if (k.startsWith('@multiplayer-app/')) rootPkg.optionalDependencies[k] = pkg.version
+}
+fs.writeFileSync(rootPkgPath, JSON.stringify(rootPkg, null, 2) + '\n')
 
 // Then publish the main wrapper package (--ignore-scripts prevents recursive publish lifecycle hook)
 await publish(ROOT, '@multiplayer-app/cli', true)

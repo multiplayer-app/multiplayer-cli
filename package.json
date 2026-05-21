@@ -1,6 +1,6 @@
 {
   "name": "@multiplayer-app/cli",
-  "version": "2.0.80",
+  "version": "2.0.91",
   "description": "Multiplayer CLI",
   "type": "module",
   "bin": {
@@ -11,15 +11,19 @@
     "publish": "bun run scripts/publish.ts",
     "dev": "bun src/index.tsx",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint 'src/**/*.ts' --config eslint.config.js"
+    "lint": "eslint 'src/**/*.ts' --config eslint.config.js",
+    "postinstall": "cd node_modules/bun && node install.js",
+    "postversion": "git push && git push --tags",
+    "preversion": "npm run lint"
   },
+  "packageManager": "pnpm@10.33.0",
   "optionalDependencies": {
-    "@multiplayer-app/cli-darwin-arm64": "2.0.80",
-    "@multiplayer-app/cli-darwin-x64": "2.0.80",
-    "@multiplayer-app/cli-linux-arm64": "2.0.80",
-    "@multiplayer-app/cli-linux-x64": "2.0.80",
-    "@multiplayer-app/cli-windows-arm64": "2.0.80",
-    "@multiplayer-app/cli-windows-x64": "2.0.80"
+    "@multiplayer-app/cli-darwin-arm64": "2.0.90",
+    "@multiplayer-app/cli-darwin-x64": "2.0.90",
+    "@multiplayer-app/cli-linux-arm64": "2.0.90",
+    "@multiplayer-app/cli-linux-x64": "2.0.90",
+    "@multiplayer-app/cli-windows-arm64": "2.0.90",
+    "@multiplayer-app/cli-windows-x64": "2.0.90"
   },
   "license": "MIT",
   "repository": {
