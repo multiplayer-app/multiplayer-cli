@@ -1,0 +1,9 @@
+packages:
+  - '.'
+
+allowBuilds:
+  bun: true
+
+linkWorkspacePackages: deep
+# shamefullyHoist: true
+nodeLinker: hoisted
