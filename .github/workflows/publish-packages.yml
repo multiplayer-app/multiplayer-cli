@@ -116,11 +116,13 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true
-      - name: Commit updated package.json
+      - name: Update lockfile after publish
+        run: pnpm install --no-frozen-lockfile --ignore-scripts
+      - name: Commit updated package.json and lockfile
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json
+          git add package.json pnpm-lock.yaml
           git diff --staged --quiet && exit 0
           git commit -m "chore: update optionalDependencies [skip ci]"
           SOURCE_BRANCH=$(git branch -r --contains ${{ github.sha }} | grep -v 'HEAD' | head -1 | sed 's/.*origin\///' | xargs)
