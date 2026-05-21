@@ -1,6 +1,6 @@
 {
   "name": "@multiplayer-app/cli",
-  "version": "2.0.86",
+  "version": "2.0.87",
   "description": "Multiplayer CLI",
   "type": "module",
   "bin": {
