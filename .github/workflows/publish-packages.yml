@@ -135,7 +135,7 @@ jobs:
         with:
           path: "**/node_modules"
           key: node-modules-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - name: Build all platform binaries
         run: bun run scripts/build.ts
       - name: Upload binaries
@@ -175,7 +175,7 @@ jobs:
         with:
           path: "**/node_modules"
           key: node-modules-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm install --no-frozen-lockfile --ignore-scripts
       - name: Download CLI binaries
         uses: actions/download-artifact@v4
         with:
