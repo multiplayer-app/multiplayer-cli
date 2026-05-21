@@ -21,7 +21,7 @@ eslint.config.js
 
 AGENTS.md
 CLAUDE.md
-lefthook.yaml
+lefthook.yml
 pnpm-workspace.yaml
 turbo.json
 README.md
