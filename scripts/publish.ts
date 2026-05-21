@@ -9,11 +9,11 @@ const prereleaseMatch = pkg.version?.match(/-([\w]+)(\.\d+)?$/)
 const distTag = prereleaseMatch ? prereleaseMatch[1] : 'latest'
 
 const PLATFORMS: { dir: string; bin: string }[] = [
-  { dir: 'darwin-arm64',  bin: 'multiplayer'     },
-  { dir: 'darwin-x64',    bin: 'multiplayer'     },
-  { dir: 'linux-x64',     bin: 'multiplayer'     },
-  { dir: 'linux-arm64',   bin: 'multiplayer'     },
-  { dir: 'windows-x64',   bin: 'multiplayer.exe' },
+  { dir: 'darwin-arm64', bin: 'multiplayer' },
+  { dir: 'darwin-x64', bin: 'multiplayer' },
+  { dir: 'linux-x64', bin: 'multiplayer' },
+  { dir: 'linux-arm64', bin: 'multiplayer' },
+  { dir: 'windows-x64', bin: 'multiplayer.exe' },
   { dir: 'windows-arm64', bin: 'multiplayer.exe' },
 ]
 
