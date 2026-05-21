@@ -117,6 +117,9 @@ importers:
       '@multiplayer-app/cli-linux-x64':
         specifier: 2.0.90
         version: 2.0.90
+      '@multiplayer-app/cli-windows-arm64':
+        specifier: 2.0.90
+        version: 2.0.90
       '@multiplayer-app/cli-windows-x64':
         specifier: 2.0.90
         version: 2.0.90
@@ -462,6 +465,12 @@ packages:
     resolution: {integrity: sha512-OgBFxaVrkwfzYt4DvppsSq7K6guriCwezCemy46QyQtsld5O8YiB6QflkPdvGJdFUQSNiGO8TbtquY9tS+kJfw==}
     cpu: [x64]
     os: [linux]
+    hasBin: true
+
+  '@multiplayer-app/cli-windows-arm64@2.0.90':
+    resolution: {integrity: sha512-gJvFYwNFJEzCu9a+1IBw7HHPQnD4+0bUbhAg9eGS3p9WJXd7Bd6YcKD+Ih5vmelMfHl1lit41+m/QTu2xawvnA==}
+    cpu: [arm64]
+    os: [win32]
     hasBin: true
 
   '@multiplayer-app/cli-windows-x64@2.0.90':
@@ -2154,6 +2163,9 @@ snapshots:
     optional: true
 
   '@multiplayer-app/cli-linux-x64@2.0.90':
+    optional: true
+
+  '@multiplayer-app/cli-windows-arm64@2.0.90':
     optional: true
 
   '@multiplayer-app/cli-windows-x64@2.0.90':

@@ -86,6 +86,8 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true
+      - name: Wait for 6 seconds to ensure npm registry is updated
+        run: sleep 6
       - name: Update lockfile after publish
         run: pnpm install --no-frozen-lockfile --ignore-scripts
       - name: Commit updated package.json and lockfile
