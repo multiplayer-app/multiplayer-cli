@@ -12,7 +12,7 @@
     "dev": "bun src/index.tsx",
     "typecheck": "tsc --noEmit",
     "lint": "eslint 'src/**/*.ts' --config eslint.config.js",
-    "postinstall": "cd node_modules/bun && node install.js",
+    "prepare": "cd node_modules/bun && node install.js",
     "postversion": "git push && git push --tags",
     "preversion": "npm run lint"
   },
