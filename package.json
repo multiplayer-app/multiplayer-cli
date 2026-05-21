@@ -18,12 +18,12 @@
   },
   "packageManager": "pnpm@10.33.0",
   "optionalDependencies": {
-    "@multiplayer-app/cli-darwin-arm64": "2.0.80",
-    "@multiplayer-app/cli-darwin-x64": "2.0.80",
-    "@multiplayer-app/cli-linux-arm64": "2.0.80",
-    "@multiplayer-app/cli-linux-x64": "2.0.80",
-    "@multiplayer-app/cli-windows-arm64": "2.0.80",
-    "@multiplayer-app/cli-windows-x64": "2.0.80"
+    "@multiplayer-app/cli-darwin-arm64": "2.0.87",
+    "@multiplayer-app/cli-darwin-x64": "2.0.87",
+    "@multiplayer-app/cli-linux-arm64": "2.0.87",
+    "@multiplayer-app/cli-linux-x64": "2.0.87",
+    "@multiplayer-app/cli-windows-arm64": "2.0.87",
+    "@multiplayer-app/cli-windows-x64": "2.0.87"
   },
   "license": "MIT",
   "repository": {
