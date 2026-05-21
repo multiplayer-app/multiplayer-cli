@@ -18,3 +18,12 @@ npm-debug.log
 *.map
 .turbo
 eslint.config.js
+
+AGENTS.md
+CLAUDE.md
+lefthook.yaml
+pnpm-workspace.yaml
+turbo.json
+README.md
+docs
+.github
