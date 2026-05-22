@@ -1,10 +1,12 @@
-import { useMemo, type ReactElement, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
 import type { MouseEvent } from '@opentui/core'
 import { MouseButton } from '@opentui/core'
 import { tuiAttrs } from '../../lib/tuiAttrs.js'
 import { collapseForSingleLine, formatBytes, stripAgentDisplayNoise } from '../../lib/formatDisplay.js'
+import { copyToClipboard } from '../../lib/clipboard.js'
 import type { SessionDetail, SessionMessage, SessionStatus } from '../../runtime/types.js'
 import type { AgentToolCall } from '../../types/index.js'
+import { clickHandler } from '../shared/clickHandler.js'
 import { EmptyDetailPane } from '../EmptyDetailPane.js'
 import {
   ACCENT,
@@ -23,7 +25,7 @@ import {
   SEM_VIOLET_SOFT,
   SEM_YELLOW,
   USER_TRANSCRIPT_COLORS,
-  activityLabelAccent
+  activityLabelAccent,
 } from '../shared/tuiTheme.js'
 
 const USER_MSG = USER_TRANSCRIPT_COLORS
@@ -34,14 +36,14 @@ const STATUS_LABEL: Record<SessionStatus, { label: string; color: string }> = {
   pushing: { label: 'pushing', color: SEM_INDIGO },
   done: { label: 'done', color: SEM_GREEN },
   failed: { label: 'failed', color: SEM_RED },
-  aborted: { label: 'aborted', color: FG_DIM }
+  aborted: { label: 'aborted', color: FG_DIM },
 }
 
 const TOOL_STATUS: Record<AgentToolCall['status'], { icon: string; color: string }> = {
   pending: { icon: '○', color: SEM_AMBER },
   running: { icon: '◐', color: SEM_AMBER },
   succeeded: { icon: '✓', color: SEM_GREEN },
-  failed: { icon: '✗', color: SEM_RED }
+  failed: { icon: '✗', color: SEM_RED },
 }
 
 const getToolStatus = (status: AgentToolCall['status'] | undefined): { icon: string; color: string } =>
@@ -211,7 +213,7 @@ function InlineSegments({ segments, dim }: { segments: Segment[]; dim?: boolean 
           </span>
         ) : (
           s.text
-        )
+        ),
       )}
     </>
   ) as ReactElement
@@ -390,7 +392,7 @@ type MarkdownVariant = 'default' | 'user'
 function MarkdownLine({
   line,
   muted = false,
-  variant = 'default'
+  variant = 'default',
 }: {
   line: string
   muted?: boolean
@@ -512,10 +514,26 @@ type DetailRow =
   | { key: string; type: 'toolOutputLine'; text: string }
   | { key: string; type: 'line'; line: string; fromUser?: boolean; muted?: boolean }
   | { key: string; type: 'codeStart'; lang: string; fromUser?: boolean }
-  | { key: string; type: 'codeLine'; line: string; fromUser?: boolean }
+  | { key: string; type: 'codeLine'; line: string; blockId?: string; lineIndex?: number; fromUser?: boolean }
   | { key: string; type: 'codeEnd'; fromUser?: boolean }
+  | {
+      key: string
+      type: 'codeCollapseToggle'
+      blockId: string
+      totalLines: number
+      previewLines: number
+      fullText: string
+      fromUser?: boolean
+    }
   | { key: string; type: 'spacer'; fromUser?: boolean }
   | { key: string; type: 'messageGap' }
+
+// Code blocks longer than this get a Show-more / Copy affordance. Smaller
+// blocks render in full — the threshold should be large enough that ordinary
+// snippets aren't hidden but small enough to keep the OTLP / context-doc
+// JSON dumps from drowning the transcript.
+const LARGE_CODE_THRESHOLD = 12
+const LARGE_CODE_PREVIEW = 6
 
 const buildMessageRows = (msg: SessionMessage, contentWidth?: number): DetailRow[] => {
   const toolCalls = msg.toolCalls ?? []
@@ -542,7 +560,7 @@ const buildMessageRows = (msg: SessionMessage, contentWidth?: number): DetailRow
       roleColor: prefixInfo.color,
       prefix: prefixInfo.text,
       icon: prefixInfo.icon,
-      userHighlight: fromUser
+      userHighlight: fromUser,
     })
   }
 
@@ -552,7 +570,7 @@ const buildMessageRows = (msg: SessionMessage, contentWidth?: number): DetailRow
       key: `att-${msg.id}-${att.type}-${att.name}`,
       type: 'attachmentLine',
       text: `[${att.type}] ${att.name}${sizePart}`,
-      fromUser
+      fromUser,
     })
   }
 
@@ -566,14 +584,34 @@ const buildMessageRows = (msg: SessionMessage, contentWidth?: number): DetailRow
       } else if (b.type === 'line') {
         rows.push({ key: `line-${msg.id}-${i}`, type: 'line', line: b.line, fromUser, muted: isReasoning })
       } else {
+        const isLarge = b.lines.length > LARGE_CODE_THRESHOLD
+        const blockId = isLarge ? `block-${msg.id}-${i}` : undefined
         rows.push({
           key: `code-start-${msg.id}-${i}`,
           type: 'codeStart',
           lang: b.lang || 'text',
-          fromUser
+          fromUser,
         })
         for (const [j, line] of b.lines.entries()) {
-          rows.push({ key: `code-line-${msg.id}-${i}-${j}`, type: 'codeLine', line, fromUser })
+          rows.push({
+            key: `code-line-${msg.id}-${i}-${j}`,
+            type: 'codeLine',
+            line,
+            blockId,
+            lineIndex: blockId ? j : undefined,
+            fromUser,
+          })
+        }
+        if (isLarge && blockId) {
+          rows.push({
+            key: `code-toggle-${msg.id}-${i}`,
+            type: 'codeCollapseToggle',
+            blockId,
+            totalLines: b.lines.length,
+            previewLines: LARGE_CODE_PREVIEW,
+            fullText: b.lines.join('\n'),
+            fromUser,
+          })
         }
         rows.push({ key: `code-end-${msg.id}-${i}`, type: 'codeEnd', fromUser })
       }
@@ -594,7 +632,7 @@ const buildMessageRows = (msg: SessionMessage, contentWidth?: number): DetailRow
       iconColor,
       nameColor: FG_MUTED,
       name: tc.name,
-      detail
+      detail,
     })
 
     // Inline error for failed tools
@@ -603,7 +641,7 @@ const buildMessageRows = (msg: SessionMessage, contentWidth?: number): DetailRow
       rows.push({
         key: `tool-err-${msg.id}-${tc.id}`,
         type: 'toolError',
-        text: errText
+        text: errText,
       })
     }
 
@@ -618,7 +656,7 @@ const buildMessageRows = (msg: SessionMessage, contentWidth?: number): DetailRow
           rows.push({
             key: `tool-out-${msg.id}-${tc.id}-${oi++}`,
             type: 'toolOutputLine',
-            text: chunk
+            text: chunk,
           })
         }
       }
@@ -820,7 +858,7 @@ function SessionDetailPaneImpl({
   demoUrl,
   demoError,
   onRequestFocus,
-  onRequestLoadMore
+  onRequestLoadMore,
 }: Props): ReactElement {
   const borderColor = isFocused ? ACCENT : BORDER_MUTED
 
@@ -842,7 +880,92 @@ function SessionDetailPaneImpl({
 
   const { rows: allRows, activeReasoning } = useMemo(
     () => buildSessionRows(session, contentWidth),
-    [session, contentWidth]
+    [session, contentWidth],
+  )
+
+  // Large code blocks (e.g. the captured-context OTLP dump) start collapsed.
+  // We track the expanded set here so the rebuild from `buildSessionRows`
+  // stays pure — render-time decides what to display.
+  const [expandedBlocks, setExpandedBlocks] = useState<Set<string>>(() => new Set())
+  const [recentlyCopied, setRecentlyCopied] = useState<Set<string>>(() => new Set())
+  const copyTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  useEffect(() => {
+    const timers = copyTimersRef.current
+    return () => {
+      for (const t of timers.values()) clearTimeout(t)
+      timers.clear()
+    }
+  }, [])
+
+  const handleToggleBlock = useCallback((blockId: string) => {
+    setExpandedBlocks((prev) => {
+      const next = new Set(prev)
+      if (next.has(blockId)) next.delete(blockId)
+      else next.add(blockId)
+      return next
+    })
+  }, [])
+
+  const handleCopyBlock = useCallback((blockId: string, text: string) => {
+    copyToClipboard(text)
+    setRecentlyCopied((prev) => new Set(prev).add(blockId))
+    const existing = copyTimersRef.current.get(blockId)
+    if (existing) clearTimeout(existing)
+    const timer = setTimeout(() => {
+      setRecentlyCopied((prev) => {
+        const next = new Set(prev)
+        next.delete(blockId)
+        return next
+      })
+      copyTimersRef.current.delete(blockId)
+    }, 2000)
+    copyTimersRef.current.set(blockId, timer)
+  }, [])
+
+  const renderRow = useCallback(
+    (row: DetailRow): ReactElement | null => {
+      if (row.type === 'codeLine' && row.blockId && !expandedBlocks.has(row.blockId)) {
+        if ((row.lineIndex ?? 0) >= LARGE_CODE_PREVIEW) return null
+      }
+      if (row.type === 'codeCollapseToggle') {
+        const expanded = expandedBlocks.has(row.blockId)
+        const copied = recentlyCopied.has(row.blockId)
+        const hidden = row.totalLines - row.previewLines
+        const toggleLabel = expanded ? '▲ Collapse' : `▼ Show ${hidden} more lines`
+        const borderFg = row.fromUser ? USER_MSG.codeBorder : FG_DIM
+        const inner = (
+          <box flexDirection='row'>
+            <text fg={borderFg}>│ </text>
+            <text
+              fg={SEM_AMBER}
+              attributes={tuiAttrs({ bold: true })}
+              onMouseUp={clickHandler(() => handleToggleBlock(row.blockId))}
+            >
+              {toggleLabel}
+            </text>
+            <text fg={borderFg}> · </text>
+            <text
+              fg={copied ? SEM_GREEN : ACCENT}
+              attributes={tuiAttrs({ bold: copied })}
+              onMouseUp={clickHandler(() => handleCopyBlock(row.blockId, row.fullText))}
+            >
+              {copied ? '✓ Copied' : 'Copy'}
+            </text>
+          </box>
+        )
+        if (row.fromUser) {
+          return (
+            <UserAccentRow key={row.key} rowKey={row.key}>
+              {inner}
+            </UserAccentRow>
+          ) as ReactElement
+        }
+        return <box key={row.key} flexDirection='row'>{inner}</box> as ReactElement
+      }
+      return renderDetailRow(row)
+    },
+    [expandedBlocks, recentlyCopied, handleToggleBlock, handleCopyBlock],
   )
 
   if (!session) {
@@ -868,9 +991,9 @@ function SessionDetailPaneImpl({
               showArrows: true,
               trackOptions: {
                 foregroundColor: ACCENT,
-                backgroundColor: BORDER_MUTED
-              }
-            }
+                backgroundColor: BORDER_MUTED,
+              },
+            },
           }}
         >
           <EmptyDetailPane
@@ -945,9 +1068,9 @@ function SessionDetailPaneImpl({
             showArrows: true,
             trackOptions: {
               foregroundColor: ACCENT,
-              backgroundColor: BORDER_MUTED
-            }
-          }
+              backgroundColor: BORDER_MUTED,
+            },
+          },
         }}
       >
         {allRows.length > 0 && session.hasMore && (
@@ -976,7 +1099,7 @@ function SessionDetailPaneImpl({
           {allRows.length === 0 && !activeReasoning ? (
             <text attributes={tuiAttrs({ dim: true })}>No messages yet...</text>
           ) : (
-            allRows.map((row) => renderDetailRow(row))
+            allRows.map((row) => renderRow(row))
           )}
           {activeReasoning && <text attributes={tuiAttrs({ dim: true })}>{activeReasoning}</text>}
         </box>

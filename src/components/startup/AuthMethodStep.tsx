@@ -35,16 +35,24 @@ interface Props {
   config: Partial<AgentConfig>
   url: string
   profileName?: string
+  /**
+   * Hide the API-key option and start the OAuth flow immediately on mount.
+   * Used by the demo flow, which only supports OAuth (the demo auto-creates
+   * a project, which the API-key path can't do).
+   */
+  oauthOnly?: boolean
   onComplete: (
     updates: Partial<AgentConfig> & { _oauthWorkspaces?: SelectableWorkspace[]; _accountName?: string }
   ) => void
   onBack?: () => void
 }
 
-export function AuthMethodStep({ config, url, profileName, onComplete, onBack }: Props): ReactElement {
+export function AuthMethodStep({ config, url, profileName, oauthOnly, onComplete, onBack }: Props): ReactElement {
   const [subStep, setSubStep] = useState<SubStep>('select')
   const [selected, setSelected] = useState(0)
-  const [oauthState, setOAuthState] = useState<OAuthState>('idle')
+  // In oauthOnly mode we mount straight into the OAuth flow — skip the brief
+  // 'idle' flash where the selection list would otherwise render.
+  const [oauthState, setOAuthState] = useState<OAuthState>(oauthOnly ? 'loading' : 'idle')
   const [oauthFallbackUrl, setOAuthFallbackUrl] = useState<string | null>(null)
   const [urlCopied, setUrlCopied] = useState(false)
   const urlCopiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -58,6 +66,13 @@ export function AuthMethodStep({ config, url, profileName, onComplete, onBack }:
     }
   }, [])
 
+  // Demo flow: skip the selection screen and kick off OAuth as soon as the
+  // step mounts. The user has no API-key choice to make. `oauthOnly` is
+  // stable for the lifetime of this step — only the mount run matters.
+  useEffect(() => {
+    if (oauthOnly) startOAuth()
+  }, [oauthOnly])
+
   // API key sub-step state
   const [apiKeyValue, setApiKeyValue] = useState(config.authType === 'api_key' ? (config.apiKey ?? '') : '')
   const [apiKeyValidating, setApiKeyValidating] = useState(false)
@@ -67,6 +82,11 @@ export function AuthMethodStep({ config, url, profileName, onComplete, onBack }:
     if (oauthManagerRef.current) {
       void oauthManagerRef.current.stopCallbackServer()
       oauthManagerRef.current = null
+    }
+    // oauthOnly has no selection screen to fall back to — bounce out instead.
+    if (oauthOnly) {
+      onBack?.()
+      return
     }
     setSubStep('select')
     setOAuthState('idle')

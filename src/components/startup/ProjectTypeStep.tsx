@@ -1,27 +1,18 @@
-import { useState, useMemo, type ReactElement } from 'react'
-import { execFile } from 'child_process'
-import { promisify } from 'util'
+import { useMemo, useState, type ReactElement } from 'react'
 import { useKeyboard } from '@opentui/react'
-import fs from 'fs'
 import path from 'path'
 import { tuiAttrs } from '../../lib/tuiAttrs.js'
 import type { AgentConfig } from '../../types/index.js'
-import { DEFAULT_MAX_CONCURRENT, DEMO_REPO_URL } from '../../config.js'
-import { AnimatedLoading, FooterHints, SelectionList, type SelectionItem } from '../shared/index.js'
-import { DirectoryStep } from './DirectoryStep.js'
-import { listProjects, loadProfile, touchProject, readRootSettings, readProjectSettings, type ProjectEntry } from '../../cli/profile.js'
+import { FooterHints, SelectionList, type SelectionItem } from '../shared/index.js'
+import { listProjects, loadProfile, touchProject, type ProjectEntry } from '../../cli/profile.js'
 import { OAuthManager } from '../../auth/oauth-manager.js'
 
-const execFileAsync = promisify(execFile)
-
-function normalizeGitUrl(url: string): string {
-  return url.trim().replace(/^(https?|git):\/\//, '').replace(/\.git$/, '')
-}
-
-type SubStep = 'select' | 'pick-parent' | 'cloning' | 'loading' | 'error'
+export type FlowChoice =
+  | { kind: 'demo'; updates: Partial<AgentConfig>; accountName?: string }
+  | { kind: 'regular'; updates: Partial<AgentConfig>; accountName?: string }
 
 interface Props {
-  onComplete: (updates: Partial<AgentConfig> & { _accountName?: string }) => void
+  onComplete: (choice: FlowChoice) => void
 }
 
 type PrimaryNavItem = { kind: 'existing' } | { kind: 'example' }
@@ -46,14 +37,58 @@ const PRIMARY_SELECTION_ITEMS: SelectionItem[] = [
   },
 ]
 
+/**
+ * Resolves a registered project entry (recent project) into the config updates
+ * and account name to seed the flow with. Returns null if OAuth refresh failed
+ * — caller falls back to a fresh auth flow for the same dir.
+ */
+async function loadRecentProjectUpdates(
+  entry: ProjectEntry,
+): Promise<{ updates: Partial<AgentConfig>; accountName: string }> {
+  touchProject(entry.path)
+  const profile = loadProfile(entry.account, entry.path)
+  let apiKey = profile.apiKey
+
+  if (profile.authType === 'oauth') {
+    const token = await new OAuthManager(entry.account).getAccessToken()
+    if (!token) {
+      // No token available — flow will start at auth-method to re-authenticate.
+      return {
+        updates: { dir: entry.path, isDemoProject: entry.demo ?? false },
+        accountName: entry.account,
+      }
+    }
+    apiKey = token
+  }
+
+  return {
+    updates: {
+      url: profile.url,
+      dir: profile.dir ?? entry.path,
+      apiKey,
+      authType: profile.authType,
+      workspace: profile.workspace,
+      project: profile.project,
+      model: profile.model,
+      modelKey: profile.modelKey,
+      modelUrl: profile.modelUrl,
+      maxConcurrentIssues: profile.maxConcurrentIssues,
+      sessionRecorderSetupDone: profile.sessionRecorderSetupDone,
+      sessionRecorderStacks: profile.sessionRecorderStacks,
+      isDemoProject: entry.demo ?? false,
+      demoSetupDone: entry.demo ? true : undefined,
+      git: profile.git,
+    },
+    accountName: entry.account,
+  }
+}
+
 export function ProjectTypeStep({ onComplete }: Props): ReactElement {
   const [selected, setSelected] = useState(0)
-  const [subStep, setSubStep] = useState<SubStep>('select')
-  const [errorBackStep, setErrorBackStep] = useState<SubStep>('select')
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const registeredProjects = useMemo(() => listProjects(), [])
-
   const projectNavItems = useMemo<ProjectNavItem[]>(
     () => registeredProjects.map((entry) => ({ kind: 'project', entry })),
     [registeredProjects],
@@ -75,196 +110,61 @@ export function ProjectTypeStep({ onComplete }: Props): ReactElement {
     [projectNavItems],
   )
 
+  const handleSelect = (idx: number) => {
+    const item = navItems[idx]
+    if (!item) return
+
+    if (item.kind === 'existing') {
+      onComplete({ kind: 'regular', updates: {} })
+      return
+    }
+    if (item.kind === 'example') {
+      onComplete({ kind: 'demo', updates: {} })
+      return
+    }
+
+    setLoading(true)
+    void (async () => {
+      try {
+        const { updates, accountName } = await loadRecentProjectUpdates(item.entry)
+        onComplete({
+          kind: item.entry.demo ? 'demo' : 'regular',
+          updates,
+          accountName,
+        })
+      } catch (err) {
+        setError((err as Error).message)
+        setLoading(false)
+      }
+    })()
+  }
+
   useKeyboard((key) => {
     const { name } = key
-    if (subStep === 'error' && name === 'escape') {
+    if (error && name === 'escape') {
       setError(null)
-      setSubStep(errorBackStep)
       key.stopPropagation()
       return
     }
-    if (subStep !== 'select') return
+    if (loading) return
     if (name === 'up' || name === 'k') setSelected((s) => Math.max(0, s - 1))
     else if (name === 'down' || name === 'j') setSelected((s) => Math.min(navItems.length - 1, s + 1))
     else if (name === 'return') handleSelect(selected)
   })
 
-  const handleSelect = (idx: number) => {
-    const item = navItems[idx]
-    if (!item) return
-    if (item.kind === 'existing') {
-      onComplete({})
-    } else if (item.kind === 'example') {
-      setSubStep('pick-parent')
-    } else {
-      setSubStep('loading')
-      void (async () => {
-        try {
-          const { entry } = item
-          touchProject(entry.path)
-          const profile = loadProfile(entry.account, entry.path)
-          let apiKey = profile.apiKey
-
-          if (profile.authType === 'oauth') {
-            const oauthManager = new OAuthManager(entry.account)
-            const token = await oauthManager.getAccessToken()
-            if (!token) {
-              onComplete({ dir: entry.path, _accountName: entry.account })
-              return
-            }
-            apiKey = token
-          }
-
-          onComplete({
-            dir: profile.dir ?? entry.path,
-            apiKey,
-            authType: profile.authType,
-            workspace: profile.workspace,
-            project: profile.project,
-            model: profile.model,
-            modelKey: profile.modelKey,
-            modelUrl: profile.modelUrl,
-            maxConcurrentIssues: profile.maxConcurrentIssues,
-            sessionRecorderSetupDone: profile.sessionRecorderSetupDone,
-            sessionRecorderStacks: profile.sessionRecorderStacks,
-            isDemoProject: entry.demo ?? false,
-            demoSetupDone: entry.demo ? true : undefined,
-            git: profile.git,
-            _accountName: entry.account,
-          })
-        } catch (err: any) {
-          setErrorBackStep('select')
-          setError(err.message)
-          setSubStep('error')
-        }
-      })()
-    }
-  }
-
-  const handleParentDirSelected = async ({ dir }: Partial<AgentConfig>) => {
-    if (!dir) return
-
-    const settingsFile = path.join(dir, '.multiplayer', 'settings.json')
-    if (fs.existsSync(settingsFile)) {
-      const registeredEntry = readRootSettings().projects.find(
-        (p) => path.resolve(p.path) === path.resolve(dir),
-      )
-
-      const isDemo = registeredEntry?.demo || readProjectSettings(dir).demo
-
-      if (isDemo) {
-        setSubStep('loading')
-        try {
-          if (registeredEntry) {
-            touchProject(dir)
-            const profile = loadProfile(registeredEntry.account, dir)
-            let apiKey = profile.apiKey
-
-            if (profile.authType === 'oauth') {
-              const oauthManager = new OAuthManager(registeredEntry.account)
-              const token = await oauthManager.getAccessToken()
-              if (!token) {
-                onComplete({ dir, isDemoProject: true, demoSetupDone: true, _accountName: registeredEntry.account })
-                return
-              }
-              apiKey = token
-            }
-
-            onComplete({
-              dir,
-              apiKey,
-              authType: profile.authType,
-              workspace: profile.workspace,
-              project: profile.project,
-              maxConcurrentIssues: profile.maxConcurrentIssues,
-              sessionRecorderSetupDone: true,
-              isDemoProject: true,
-              demoSetupDone: true,
-              git: profile.git,
-              _accountName: registeredEntry.account,
-            })
-          } else {
-            onComplete({ dir, isDemoProject: true, demoSetupDone: true })
-          }
-        } catch (err: any) {
-          setErrorBackStep('pick-parent')
-          setError(err.message)
-          setSubStep('error')
-        }
-      } else {
-        onComplete({ dir })
-        return
-      }
-      return
-    }
-
-    const entries = fs.readdirSync(dir)
-    if (entries.length > 0) {
-      let isDemoOrigin = false
-      if (fs.existsSync(path.join(dir, '.git'))) {
-        try {
-          const { stdout } = await execFileAsync('git', ['-C', dir, 'remote', 'get-url', 'origin'])
-          isDemoOrigin = normalizeGitUrl(stdout) === normalizeGitUrl(DEMO_REPO_URL)
-        } catch { /* no remote or not a git repo */ }
-      }
-      if (isDemoOrigin) {
-        onComplete({ dir, isDemoProject: true, demoSetupDone: true })
-      } else {
-        setErrorBackStep('pick-parent')
-        setError('Selected folder is not empty. Create or select an empty folder.')
-        setSubStep('error')
-      }
-      return
-    }
-
-    setSubStep('cloning')
-    try {
-      await execFileAsync('git', ['clone', '--depth=1', DEMO_REPO_URL, dir])
-      onComplete({
-        dir,
-        isDemoProject: true,
-        maxConcurrentIssues: DEFAULT_MAX_CONCURRENT,
-        sessionRecorderSetupDone: true,
-      })
-    } catch (err: any) {
-      setErrorBackStep('pick-parent')
-      setError(err.stderr?.trim() || err.message)
-      setSubStep('error')
-    }
-  }
-
-  if (subStep === 'pick-parent') {
-    return (
-      <DirectoryStep
-        config={{}}
-        title='Select where to clone the example project'
-        allowCreateFolder={true}
-        onComplete={handleParentDirSelected}
-      />
-    ) as ReactElement
-  }
-
-  if (subStep === 'cloning') {
-    return (
-      <box flexDirection='column' gap={1}>
-        <AnimatedLoading title='Cloning example project' subtitle={DEMO_REPO_URL} color='#22d3ee' />
-      </box>
-    ) as ReactElement
-  }
-
-  if (subStep === 'loading') {
-    return (
-      <box flexDirection='column' gap={1}>
-        <text fg='#f59e0b'>◌ Loading project...</text>
-      </box>
-    ) as ReactElement
-  }
-
-  if (subStep === 'error') {
+  if (error) {
     return (
       <box flexDirection='column' gap={1}>
         <text fg='#ef4444'>✗ {error}</text>
         <FooterHints hints='Esc back' />
+      </box>
+    ) as ReactElement
+  }
+
+  if (loading) {
+    return (
+      <box flexDirection='column' gap={1}>
+        <text fg='#f59e0b'>◌ Loading project...</text>
       </box>
     ) as ReactElement
   }

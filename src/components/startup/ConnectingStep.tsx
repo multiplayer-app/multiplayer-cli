@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 import { tuiAttrs } from '../../lib/tuiAttrs.js'
 import { useKeyboard } from '@opentui/react'
 import type { AgentConfig } from '../../types/index.js'
 import * as AiService from '../../services/ai.service.js'
 import * as GitService from '../../services/git.service.js'
 import { validateApiKey } from '../../services/radar.service.js'
-import { StatusIcon, FooterHints, SelectionList, type SelectionItem } from '../shared/index.js'
+import { StatusIcon, FooterHints, ActionButton } from '../shared/index.js'
+import { BORDER_SUBTLE } from '../shared/tuiTheme.js'
 
 interface Props {
   config: AgentConfig
@@ -104,15 +105,7 @@ export function ConnectingStep({ config, onComplete, onBack }: Props): ReactElem
   const [runId, setRunId] = useState(0)
   const [selectedAction, setSelectedAction] = useState(0)
 
-  const actionItems = useMemo((): SelectionItem[] => {
-    const items: SelectionItem[] = [
-      { key: 'retry', icon: '↻', iconColor: '#10b981', label: 'Retry', labelColor: '#10b981' }
-    ]
-    if (onBack) {
-      items.push({ key: 'back', icon: '←', iconColor: '#9ca3af', label: 'Back', labelColor: '#9ca3af' })
-    }
-    return items
-  }, [onBack])
+  const actionCount = onBack ? 2 : 1
 
   const showAiRow = status !== 'checking-api-key' && status !== 'checking-git'
   const stepError = (step: CheckStep): string | null => (status === 'error' && failedStep === step ? error : null)
@@ -126,9 +119,7 @@ export function ConnectingStep({ config, onComplete, onBack }: Props): ReactElem
   }
 
   const activateAction = (index: number) => {
-    const item = actionItems[index]
-    if (!item) return
-    if (item.key === 'retry') retry()
+    if (index === 0) retry()
     else onBack?.()
   }
 
@@ -139,7 +130,7 @@ export function ConnectingStep({ config, onComplete, onBack }: Props): ReactElem
       return
     }
     if (name === 'down' || name === 'j') {
-      setSelectedAction((s) => Math.min(actionItems.length - 1, s + 1))
+      setSelectedAction((s) => Math.min(actionCount - 1, s + 1))
       return
     }
     if (name === 'return') {
@@ -244,16 +235,30 @@ export function ConnectingStep({ config, onComplete, onBack }: Props): ReactElem
       </box>
       {error && (
         <box flexDirection='column' gap={1} marginTop={1} flexShrink={0}>
-          <SelectionList
-            items={actionItems}
-            selectedIndex={selectedAction}
-            onSelect={(index) => {
-              setSelectedAction(index)
-              activateAction(index)
+          <ActionButton
+            label='Retry'
+            icon='↻'
+            iconColor='#10b981'
+            labelColor='#10b981'
+            borderColor={selectedAction === 0 ? '#10b981' : BORDER_SUBTLE}
+            onClick={() => {
+              setSelectedAction(0)
+              retry()
             }}
-            scrollable={false}
-            plain
           />
+          {onBack && (
+            <ActionButton
+              label='Back'
+              icon='←'
+              iconColor='#9ca3af'
+              labelColor='#9ca3af'
+              borderColor={selectedAction === 1 ? '#9ca3af' : BORDER_SUBTLE}
+              onClick={() => {
+                setSelectedAction(1)
+                onBack()
+              }}
+            />
+          )}
           <FooterHints hints='↑↓ navigate · Enter select · Esc back' />
         </box>
       )}

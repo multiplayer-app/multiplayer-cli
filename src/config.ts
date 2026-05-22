@@ -15,6 +15,7 @@ export const BASE_API_URL = process.env.MULTIPLAYER_BASE_URL || `https://${PRODU
 // ─── Demo repo ────────────────────────────────────────────────────────────────
 
 export const DEMO_REPO_URL = 'https://github.com/multiplayer-app/cli-app-demo'
+export const DEMO_DIR = path.join(os.homedir(), 'multiplayer-demo')
 
 // ─── Agent defaults ───────────────────────────────────────────────────────────
 

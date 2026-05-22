@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 import { tuiAttrs } from '../lib/tuiAttrs.js'
 import { openUrl } from '../lib/openUrl.js'
 import { clickHandler } from './shared/clickHandler.js'
@@ -84,11 +84,24 @@ function SectionTitle({ title }: { title: string }): ReactElement {
   ) as ReactElement
 }
 
-function InfoRow({ label, value, valueColor }: { label: string; value: string; valueColor?: string }): ReactElement {
+function InfoRow({
+  label,
+  value,
+  valueColor,
+  valueElement,
+  direction = 'column'
+}: {
+  label: string
+  value?: string
+  valueElement?: ReactNode
+  valueColor?: string
+  direction?: 'row' | 'column'
+}): ReactElement {
   return (
-    <box flexDirection='column'>
+    <box flexDirection={direction} gap={direction === 'row' ? 1 : 0}>
       <text fg={FG_MUTED}>{label}</text>
       <text fg={valueColor ?? FG_VALUE}>{value}</text>
+      {valueElement}
     </box>
   ) as ReactElement
 }
@@ -126,6 +139,12 @@ const getBrowserUrl = (
     url += `/session/${session.id}`
   }
   return url
+}
+
+const getDebugSessionUrl = (workspaceId?: string, projectId?: string, debugSessionId?: string): string | null => {
+  if (!workspaceId || !projectId || !debugSessionId) return null
+  const base = getWebBaseUrl()
+  return `${base}/project/${workspaceId}/${projectId}/default/debugger/session/${debugSessionId}`
 }
 
 function ContextSidebarImpl({
@@ -236,8 +255,8 @@ function ContextSidebarImpl({
               <SectionTitle title='Stats' />
               {workspace && <InfoRow label='Workspace' value={workspace} />}
               {project && <InfoRow label='Project' value={project} />}
-              <InfoRow label='Active:' value={String(activeCount)} valueColor={SEM_AMBER} />
-              <InfoRow label='Resolved:' value={String(resolvedCount)} valueColor={SEM_GREEN} />
+              <InfoRow label='Active:' value={String(activeCount)} valueColor={SEM_AMBER} direction='row' />
+              <InfoRow label='Resolved:' value={String(resolvedCount)} valueColor={SEM_GREEN} direction='row' />
             </box>
 
             {/* Rate Limit */}
@@ -321,7 +340,23 @@ function ContextSidebarImpl({
             {session.model && <InfoRow label='Model:' value={session.model} />}
             {session.environmentName && <InfoRow label='Environment:' value={session.environmentName} />}
             {session.releaseVersion && <InfoRow label='Release:' value={session.releaseVersion} />}
-            {session.debugSessionId && <InfoRow label='Debug Session:' value={session.debugSessionId.slice(-8)} />}
+            {session.debugSessionId && (
+              <InfoRow
+                label='Debug Session:'
+                direction='row'
+                valueElement={
+                  <box
+                    onMouseUp={clickHandler(() =>
+                      openUrl(getDebugSessionUrl(workspaceId, projectId, session.debugSessionId))
+                    )}
+                  >
+                    <text fg={LINK_SUBTLE} attributes={tuiAttrs({ underline: true })}>
+                      Open
+                    </text>
+                  </box>
+                }
+              />
+            )}
             {session.branchName && (
               <box flexDirection='column'>
                 <text fg={FG_MUTED}>Branch:</text>
@@ -358,9 +393,9 @@ function ContextSidebarImpl({
           {/* Context section */}
           <box flexDirection='column' gap={1}>
             <SectionTitle title='Context' />
-            <InfoRow label='Messages:' value={String(session.messages.length)} />
-            <InfoRow label='Active:' value={String(activeCount)} valueColor={SEM_AMBER} />
-            <InfoRow label='Resolved:' value={String(resolvedCount)} valueColor={SEM_GREEN} />
+            <InfoRow label='Messages:' value={String(session.messages.length)} direction='row' />
+            <InfoRow label='Active:' value={String(activeCount)} valueColor={SEM_AMBER} direction='row' />
+            <InfoRow label='Resolved:' value={String(resolvedCount)} valueColor={SEM_GREEN} direction='row' />
             <box flexDirection='row' gap={1}>
               <text fg={FG_MUTED}>Slots:</text>
               <text fg={rateLimitState.active >= rateLimitState.limit ? SEM_RED : FG_VALUE}>

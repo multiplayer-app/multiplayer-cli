@@ -12,6 +12,12 @@ import type { SelectableWorkspace } from './ProjectSelectStep.js'
 
 interface Props {
   url: string
+  /**
+   * Hide API-key authenticated accounts. Used by the demo flow, which only
+   * supports OAuth (the demo auto-creates a project, which the API-key path
+   * can't do).
+   */
+  oauthOnly?: boolean
   onComplete: (
     updates: Partial<AgentConfig> & { _oauthWorkspaces?: SelectableWorkspace[]; _accountName?: string }
   ) => void
@@ -19,8 +25,12 @@ interface Props {
   onBack?: () => void
 }
 
-export function AccountSelectStep({ url, onComplete, onAddNew, onBack }: Props): ReactElement {
-  const [accounts, setAccounts] = useState(() => listAccounts())
+export function AccountSelectStep({ url, oauthOnly, onComplete, onAddNew, onBack }: Props): ReactElement {
+  const [accounts, setAccounts] = useState(() =>
+    oauthOnly
+      ? listAccounts().filter((name) => readCredentials(name).authType === 'oauth')
+      : listAccounts(),
+  )
 
   const items: SelectionItem[] = [
     ...accounts.map((name) => {
@@ -82,7 +92,11 @@ export function AccountSelectStep({ url, onComplete, onAddNew, onBack }: Props):
         if (!token) {
           clearCredentials(accountName)
           deleteProfileTokenData(accountName)
-          setAccounts(listAccounts())
+          setAccounts(
+            oauthOnly
+              ? listAccounts().filter((name) => readCredentials(name).authType === 'oauth')
+              : listAccounts(),
+          )
           setSelected(0)
           setLoading(false)
           setError('Token expired — please login with a new account or re-authenticate.')
