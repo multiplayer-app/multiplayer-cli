@@ -8,6 +8,7 @@ import type { AgentChatStatus } from '../types/index.js'
 import type { GitSettings } from '../cli/profile.js'
 import { GitModeSection } from './shared/GitModeSection.js'
 import { PRODUCTION_HOSTNAME, PRODUCTION_WEB_HOSTNAME } from '../config.js'
+import type { DemoStatus } from '../lib/demoProcess.js'
 import {
   ACCENT,
   BORDER_MUTED,
@@ -68,6 +69,11 @@ interface Props {
   gitSettings?: GitSettings
   isFocused: boolean
   onOpenSettings?: () => void
+  isDemoProject?: boolean
+  demoStatus?: DemoStatus
+  demoUrl?: string | null
+  demoError?: string | null
+  onToggleDemo?: () => void
 }
 
 function SectionTitle({ title }: { title: string }): ReactElement {
@@ -135,13 +141,70 @@ function ContextSidebarImpl({
   resolvedCount,
   gitSettings,
   isFocused,
-  onOpenSettings
+  onOpenSettings,
+  isDemoProject,
+  demoStatus = 'idle',
+  demoUrl,
+  demoError,
+  onToggleDemo
 }: Props): ReactElement {
   const borderColor = isFocused ? SEM_INDIGO : BORDER_MUTED
   const browserUrl = getBrowserUrl(workspaceId, projectId, session, apiUrl)
 
+  const demoSection = isDemoProject ? (
+    <box flexDirection='column' gap={0} marginTop={1} flexShrink={0}>
+      <SectionTitle title='Demo App' />
+      <box flexDirection='row' gap={1}>
+        <text
+          fg={
+            demoStatus === 'running'
+              ? SEM_GREEN
+              : demoStatus === 'error'
+                ? SEM_RED
+                : demoStatus === 'stopped'
+                  ? FG_MUTED
+                  : SEM_AMBER
+          }
+        >
+          ●
+        </text>
+        <text fg={FG_VALUE}>
+          {demoStatus === 'running'
+            ? 'Running'
+            : demoStatus === 'starting'
+              ? 'Starting...'
+              : demoStatus === 'stopped'
+                ? 'Stopped'
+                : demoStatus === 'error'
+                  ? 'Error'
+                  : 'Idle'}
+        </text>
+      </box>
+      {demoUrl ? (
+        <box onMouseUp={clickHandler(() => openUrl(demoUrl))}>
+          <text fg={LINK_SUBTLE} attributes={tuiAttrs({ underline: true })}>
+            {demoUrl.length > SIDEBAR_WIDTH - 4 ? demoUrl.slice(0, SIDEBAR_WIDTH - 7) + '...' : demoUrl}
+          </text>
+        </box>
+      ) : demoStatus === 'error' && demoError ? (
+        <text fg={FG_ERROR_SOFT}>{demoError.slice(0, SIDEBAR_WIDTH - 4)}</text>
+      ) : (
+        <text fg={FG_MUTED}>—</text>
+      )}
+    </box>
+  ) : null
+
   const actionButtons = (
     <box flexDirection='column' gap={0} marginTop={1} flexShrink={0}>
+      {demoSection}
+      {isDemoProject && onToggleDemo && (
+        <box marginTop={1}>
+          <FocusedOutlineButton
+            label={demoStatus === 'running' || demoStatus === 'starting' ? 'Stop demo' : 'Start demo'}
+            onPress={onToggleDemo}
+          />
+        </box>
+      )}
       {browserUrl && (
         <FocusedOutlineButton
           label='Open in browser'

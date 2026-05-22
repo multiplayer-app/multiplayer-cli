@@ -13,6 +13,7 @@ import { ChatComposer } from '../ChatComposer.js'
 import { ContextSidebar } from '../ContextSidebar.js'
 import { LogsDock } from '../LogsDock.js'
 import { StatusBar, type StatusBarHint } from '../StatusBar.js'
+import { demoProcess, type DemoState } from '../../lib/demoProcess.js'
 import pkg from '../../../package.json' with { type: 'json' }
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -100,6 +101,7 @@ export function DashboardScreen({
   /** Last agent settings applied from this UI (for repopulating the modal). */
   const [settingsSnapshot, setSettingsSnapshot] = useState<Partial<NonNullable<IAgent['settings']>>>({})
   const [gitSettings, setGitSettings] = useState<GitSettings>(() => config.git ?? {})
+  const [demoState, setDemoState] = useState<DemoState>(() => demoProcess.getState())
 
   // ── Derived values ──────────────────────────────────────────────────────────
 
@@ -140,6 +142,22 @@ export function DashboardScreen({
   useEffect(() => {
     if (selectedSession) onLoadMessages(selectedSession.chatId)
   }, [selectedSession?.chatId])
+
+  // Auto-start the demo dev server for demo projects; subscribe to its state.
+  // Stop it when leaving the dashboard so we don't leak a child process.
+  useEffect(() => {
+    const onChange = (next: DemoState) => setDemoState(next)
+    demoProcess.on('change', onChange)
+    if (config.isDemoProject && config.dir) demoProcess.start(config.dir)
+    return () => {
+      demoProcess.off('change', onChange)
+      if (config.isDemoProject) demoProcess.stop()
+    }
+  }, [config.isDemoProject, config.dir])
+
+  const toggleDemo = useCallback(() => {
+    demoProcess.toggle()
+  }, [])
 
   // ── Focus helpers ───────────────────────────────────────────────────────────
 
@@ -255,6 +273,12 @@ export function DashboardScreen({
           return
         }
 
+        if ((name === 'd' || name === 'D') && config.isDemoProject) {
+          toggleDemo()
+          key.stopPropagation()
+          return
+        }
+
         // ── Pane-local shortcuts ──────────────────────────────────────────
 
         if (focusedPane === 'list') {
@@ -297,7 +321,9 @@ export function DashboardScreen({
         showSettingsPanel,
         onEmitAgentSettings,
         onLoadRadarLists,
-        openSettingsPanel
+        openSettingsPanel,
+        config.isDemoProject,
+        toggleDemo
       ]
     )
   )
@@ -335,6 +361,12 @@ export function DashboardScreen({
       })
     }
 
+    if (config.isDemoProject) {
+      const demoLabel =
+        demoState.status === 'running' || demoState.status === 'starting' ? 'stop demo' : 'start demo'
+      base.push({ id: 'demo', keys: 'd', label: demoLabel, onPress: toggleDemo })
+    }
+
     base.push(
       { id: 'logs', keys: 'l', label: showLogs ? 'hide logs' : 'logs', onPress: toggleLogs },
       { id: 'setup', keys: 'r', label: 'setup', onPress: onRestartSetupRequest },
@@ -359,7 +391,10 @@ export function DashboardScreen({
     onRestartSetupRequest,
     onEmitAgentSettings,
     onLoadRadarLists,
-    openSettingsPanel
+    openSettingsPanel,
+    config.isDemoProject,
+    demoState.status,
+    toggleDemo
   ])
 
   // Resolve display names for sidebar
@@ -410,6 +445,9 @@ export function DashboardScreen({
               demoDir={config.dir}
               workspace={config.workspace}
               project={config.project}
+              demoStatus={demoState.status}
+              demoUrl={demoState.url}
+              demoError={demoState.error}
               onRequestFocus={() => setFocusedPane('detail')}
               onRequestLoadMore={() =>
                 selectedDetail?.messages[0]?.id &&
@@ -447,6 +485,11 @@ export function DashboardScreen({
             gitSettings={gitSettings}
             isFocused={false}
             onOpenSettings={canOpenSettings ? openSettingsPanel : undefined}
+            isDemoProject={config.isDemoProject}
+            demoStatus={demoState.status}
+            demoUrl={demoState.url}
+            demoError={demoState.error}
+            onToggleDemo={config.isDemoProject ? toggleDemo : undefined}
           />
         )}
       </box>

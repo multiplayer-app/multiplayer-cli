@@ -3,6 +3,7 @@ import { tuiAttrs } from '../lib/tuiAttrs.js'
 
 import { ACCENT, BRAND_MARK_PRIMARY, FG_DIM, FG_HINT } from './shared/tuiTheme.js'
 import { DemoRunInstructions } from './DemoRunInstructions.js'
+import type { DemoStatus } from '../lib/demoProcess.js'
 
 interface Props {
   hasSessions: boolean
@@ -10,9 +11,21 @@ interface Props {
   demoDir?: string
   workspace?: string
   project?: string
+  demoStatus?: DemoStatus
+  demoUrl?: string | null
+  demoError?: string | null
 }
 
-function EmptyDetailPaneImpl({ hasSessions, isDemoProject, demoDir, workspace, project }: Props): ReactElement {
+function EmptyDetailPaneImpl({
+  hasSessions,
+  isDemoProject,
+  demoDir,
+  workspace,
+  project,
+  demoStatus,
+  demoUrl,
+  demoError,
+}: Props): ReactElement {
   const showDemo = isDemoProject && !!demoDir
 
   return (
@@ -59,7 +72,14 @@ function EmptyDetailPaneImpl({ hasSessions, isDemoProject, demoDir, workspace, p
 
       {showDemo && (
         <box flexDirection='column' marginTop={2} width='80%' alignItems='stretch'>
-          <DemoRunInstructions dir={demoDir!} workspace={workspace} project={project} alignCenter={true} />
+          <DemoRunInstructions
+            workspace={workspace}
+            project={project}
+            alignCenter={true}
+            demoStatus={demoStatus ?? 'idle'}
+            demoUrl={demoUrl ?? null}
+            demoError={demoError ?? null}
+          />
         </box>
       )}
     </box>

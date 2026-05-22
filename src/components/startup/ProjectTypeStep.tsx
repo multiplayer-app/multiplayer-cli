@@ -129,7 +129,6 @@ export function ProjectTypeStep({ onComplete }: Props): ReactElement {
             sessionRecorderStacks: profile.sessionRecorderStacks,
             isDemoProject: entry.demo ?? false,
             demoSetupDone: entry.demo ? true : undefined,
-            demoInstructionsDone: entry.demo ? true : undefined,
             git: profile.git,
             _accountName: entry.account,
           })

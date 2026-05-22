@@ -31,7 +31,6 @@ import { RateLimitsStep } from '../startup/RateLimitsStep.js'
 import { ConnectingStep } from '../startup/ConnectingStep.js'
 import { MultiplayerSdkStep } from '../startup/MultiplayerSdkStep.js'
 import { DemoSetupStep } from '../startup/DemoSetupStep.js'
-import { DemoInstructionsStep } from '../startup/DemoInstructionsStep.js'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -78,7 +77,6 @@ type StepId =
   | 'model'
   | 'rate-limits'
   | 'demo-setup'
-  | 'demo-instructions'
   | 'session-recorder'
   | 'connecting'
 
@@ -153,18 +151,11 @@ const STEP_DEFS: Record<StepId, StepMeta> = {
   },
   'demo-setup': {
     title: 'Preparing Demo App',
-    description: 'Configure the cloned demo app before showing run instructions.',
+    description: 'Configure the cloned demo app before starting the agent.',
     shortLabel: 'Prepare Demo',
     hideFromSidebar: true,
     applicable: (c) => !!c.isDemoProject,
     canSkip: (c) => !c.isDemoProject || !!c.demoSetupDone,
-  },
-  'demo-instructions': {
-    title: 'Run Demo App',
-    description: 'Review the commands for starting the example client and server.',
-    shortLabel: 'Run Demo',
-    applicable: (c) => !!c.isDemoProject,
-    canSkip: (c) => !c.isDemoProject || !!c.demoInstructionsDone,
   },
   'session-recorder': {
     title: 'Session Recorder',
@@ -204,13 +195,11 @@ function prevStep(current: StepId, config: Partial<AgentConfig>): StepId | null 
     case 'rate-limits':
       return 'model'
     case 'session-recorder':
-      return config.isDemoProject ? 'demo-instructions' : 'rate-limits'
-    case 'demo-instructions':
-      return 'model'
+      return config.isDemoProject ? 'demo-setup' : 'rate-limits'
     case 'demo-setup':
       return 'model'
     case 'connecting':
-      return config.isDemoProject ? 'demo-instructions' : 'session-recorder'
+      return config.isDemoProject ? 'demo-setup' : 'session-recorder'
   }
 }
 
@@ -701,9 +690,6 @@ export function StartupScreen({
             {step === 'model' && <ModelStep config={config} onComplete={advance} />}
             {step === 'rate-limits' && <RateLimitsStep config={config} onComplete={advance} />}
             {step === 'demo-setup' && <DemoSetupStep config={config} onComplete={advance} onBack={goBack} />}
-            {step === 'demo-instructions' && (
-              <DemoInstructionsStep config={config} onComplete={advance} onBack={goBack} />
-            )}
             {step === 'session-recorder' && <MultiplayerSdkStep config={config} onComplete={advance} onBack={goBack} />}
             {step === 'connecting' && (
               <ConnectingStep config={config as AgentConfig} onComplete={onComplete} onBack={goBack} />

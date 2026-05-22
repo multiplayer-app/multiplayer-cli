@@ -799,6 +799,9 @@ interface Props {
   demoDir?: string
   workspace?: string
   project?: string
+  demoStatus?: import('../../lib/demoProcess.js').DemoStatus
+  demoUrl?: string | null
+  demoError?: string | null
   /** Primary click anywhere in the pane moves dashboard focus here (terminal mouse). */
   onRequestFocus?: () => void
   onRequestLoadMore?: () => void
@@ -813,6 +816,9 @@ function SessionDetailPaneImpl({
   demoDir,
   workspace,
   project,
+  demoStatus,
+  demoUrl,
+  demoError,
   onRequestFocus,
   onRequestLoadMore
 }: Props): ReactElement {
@@ -873,6 +879,9 @@ function SessionDetailPaneImpl({
             demoDir={demoDir}
             workspace={workspace}
             project={project}
+            demoStatus={demoStatus}
+            demoUrl={demoUrl}
+            demoError={demoError}
           />
         </scrollbox>
       </box>

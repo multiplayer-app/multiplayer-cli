@@ -26,8 +26,6 @@ export interface AgentConfig {
   isDemoProject?: boolean
   /** Whether the demo app env files have been populated with generated SDK keys. */
   demoSetupDone?: boolean
-  /** Whether the user has reviewed the demo app run instructions. */
-  demoInstructionsDone?: boolean
   /** Granular git operation controls loaded from <projectDir>/.multiplayer/settings.json */
   git?: import('../cli/profile.js').GitSettings
 }
