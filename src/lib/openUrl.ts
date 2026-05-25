@@ -24,13 +24,14 @@ function getOpenCommands(url: string): OpenCommand[] {
     return [
       { cmd: 'cmd.exe', args: ['/c', 'start', '', url] },
       { cmd: 'wslview', args: [url] },
-      { cmd: 'xdg-open', args: [url] },
+      { cmd: 'xdg-open', args: [url] }
     ]
   }
   return [{ cmd: 'xdg-open', args: [url] }]
 }
 
-export function openUrl(url: string): void {
+export function openUrl(url?: string | null): void {
+  if (!url) return
   const commands = getOpenCommands(url)
 
   const tryCommand = (index: number) => {
@@ -44,7 +45,7 @@ export function openUrl(url: string): void {
       const child = spawn(current.cmd, current.args, {
         detached: true,
         stdio: 'ignore',
-        shell: current.shell ?? false,
+        shell: current.shell ?? false
       })
       child.on('error', () => {
         tryCommand(index + 1)

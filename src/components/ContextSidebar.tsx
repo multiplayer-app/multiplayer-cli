@@ -224,7 +224,8 @@ function ContextSidebarImpl({
           />
         </box>
       )}
-      {browserUrl && (
+
+      {!isDemoProject && browserUrl && (
         <FocusedOutlineButton
           label='Open in browser'
           idleBorderColor={BRAND_MARK_PRIMARY}
