@@ -37,6 +37,7 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
   const [subStep, setSubStep] = useState<SubStep>('detecting')
   const [claudeAvailable, setClaudeAvailable] = useState(false)
   const [detectError, setDetectError] = useState<string | null>(null)
+  const [loginError, setLoginError] = useState(false)
   const [options, setOptions] = useState<ModelOption[]>([])
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [selectedModel, setSelectedModel] = useState<ModelOption | null>(null)
@@ -47,7 +48,10 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
   const [customModelError, setCustomModelError] = useState<string | null>(null)
   const [validating, setValidating] = useState(false)
 
-  useEffect(() => {
+  const runDetection = () => {
+    setSubStep('detecting')
+    setDetectError(null)
+    setLoginError(false)
     AiService.checkClaudeRequirements()
       .then(async () => {
         setClaudeAvailable(true)
@@ -75,15 +79,23 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
         ])
         setSubStep('select')
       })
-      .catch(() => {
+      .catch((err: Error) => {
         setClaudeAvailable(false)
         setOptions([
           ...OPENAI_MODELS,
           { label: 'Custom OpenAI-compatible...', value: '__custom__', provider: 'openai' }
         ])
-        setDetectError('Claude CLI not found — Claude models unavailable')
+        if (err.message.includes('not authenticated') || err.message.includes('not logged in')) {
+          setLoginError(true)
+        } else {
+          setDetectError('Claude CLI not found — Claude models unavailable')
+        }
         setSubStep('select')
       })
+  }
+
+  useEffect(() => {
+    runDetection()
   }, [])
 
   const selectModel = (opt: ModelOption) => {
@@ -106,6 +118,7 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
 
   useKeyboard((key: KeyEvent) => {
     const { name } = key
+
     // Navigation in select mode
     if (subStep === 'select') {
       if (name === 'up') {
@@ -115,13 +128,10 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
       } else if (name === 'return') {
         const opt = options[selectedIndex]
         if (opt) selectModel(opt)
+      } else if ((name === 'r' || name === 'R') && loginError) {
+        runDetection()
+        key.stopPropagation()
       }
-    }
-
-    // Back navigation from sub-steps (consume Esc so StartupScreen does not jump to directory)
-    if (name === 'escape' && (subStep === 'api-key' || subStep === 'custom-model' || subStep === 'api-url')) {
-      setSubStep('select')
-      key.stopPropagation()
     }
   })
 
@@ -190,9 +200,36 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
 
     return (
       <box flexDirection='column' flexGrow={1} flexShrink={1} overflow={'hidden' as const}>
-        {detectError && <text fg='#f59e0b'> ⚠ {detectError}</text>}
-        {claudeAvailable && <text fg='#10b981'> ✓ Claude CLI detected</text>}
-        <text attributes={tuiAttrs({ dim: true })} marginLeft={1}>
+        {detectError && (
+          <text fg='#f59e0b' flexShrink={0}>
+            {detectError}
+          </text>
+        )}
+        {loginError && (
+          <box flexDirection='column' marginLeft={1} gap={0} flexShrink={0}>
+            <text fg='#f59e0b' flexShrink={0}>
+              Claude Code is not logged in — Claude models unavailable
+            </text>
+            <box flexDirection='row' flexWrap='wrap' flexShrink={0}>
+              <text attributes={tuiAttrs({ dim: true })} flexShrink={0}>
+                Open a new terminal tab, run{' '}
+              </text>
+              <text fg='#22d3ee' flexShrink={0}>
+                claude /login
+              </text>
+              <text attributes={tuiAttrs({ dim: true })} flexShrink={0}>
+                , then press R to retry.
+              </text>
+            </box>
+          </box>
+        )}
+        {claudeAvailable && (
+          <text fg='#10b981' flexShrink={0}>
+            {' '}
+            ✓ Claude CLI detected
+          </text>
+        )}
+        <text attributes={tuiAttrs({ dim: true })} marginLeft={1} flexShrink={0}>
           Use Claude for fastest local setup, or OpenAI-compatible with API key.
         </text>
         <box marginTop={1} flexGrow={1} flexShrink={1} overflow={'hidden' as const}>
@@ -206,7 +243,15 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
             flexGrow={1}
           />
         </box>
-        <FooterHints hints='↑↓ navigate · Enter select · Click to select · Esc back' paddingLeft={1} marginTop={1} />
+        <FooterHints
+          hints={
+            loginError
+              ? '↑↓ navigate · Enter select · R retry login · Esc back'
+              : '↑↓ navigate · Enter select · Click to select · Esc back'
+          }
+          paddingLeft={1}
+          marginTop={1}
+        />
       </box>
     ) as ReactElement
   }

@@ -48,7 +48,7 @@ export function GitModeSection({ git, title = 'Git operations' }: Props): ReactE
       <text fg={FG_MUTED} attributes={tuiAttrs({ bold: true })}>
         {title}
       </text>
-      <box flexDirection='row' gap={1} marginTop={1}>
+      <box flexDirection='row' gap={1}>
         <text fg={display.color}>●</text>
         <text fg={display.color}>{display.label}</text>
       </box>
