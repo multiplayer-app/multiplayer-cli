@@ -1,14 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { useKeyboard } from '@opentui/react'
 import type { AgentConfig } from '../../../types/index.js'
-import { API_URL } from '../../../config.js'
+import { API_URL, DEFAULT_MAX_CONCURRENT } from '../../../config.js'
 import { createApiService } from '../../../services/api.service.js'
-import { listAccounts, readCredentials } from '../../../cli/profile.js'
 import { persistSetupState } from '../../../cli/setup-persistence.js'
 import { SetupShell, type SidebarEntry } from '../SetupShell.js'
-import { DemoCloneStep } from '../DemoCloneStep.js'
-import { AccountSelectStep } from '../AccountSelectStep.js'
-import { AuthMethodStep } from '../AuthMethodStep.js'
+import { DemoProgressScreen, type DemoProgressResult } from '../DemoProgressScreen.js'
 import { ProjectSelectStep, type SelectableWorkspace } from '../ProjectSelectStep.js'
 import { ModelStep } from '../ModelStep.js'
 import { DemoSetupStep } from '../DemoSetupStep.js'
@@ -16,50 +13,27 @@ import { ConnectingStep } from '../ConnectingStep.js'
 
 // ─── Step definitions ─────────────────────────────────────────────────────────
 
-type StepId =
-  | 'clone'
-  | 'account-select'
-  | 'auth-method'
-  | 'project-select'
-  | 'model'
-  | 'demo-setup'
-  | 'connecting'
+type StepId = 'progress' | 'project-select' | 'model' | 'demo-setup' | 'connecting'
 
 interface StepMeta {
   title: string
   description: string
   shortLabel: string
-  sidebarGroup?: string
   hideFromSidebar?: boolean
   canSkip: (c: Partial<AgentConfig>) => boolean
 }
 
 const STEP_DEFS: Record<StepId, StepMeta> = {
-  clone: {
-    title: 'Preparing Demo',
-    description: 'Cloning (or updating) the Multiplayer demo repository.',
-    shortLabel: 'Repository',
-    canSkip: (c) => !!c.dir && !!c.isDemoProject,
-  },
-  'account-select': {
-    title: 'Select Account',
-    description: 'Link this demo to an existing Multiplayer account or add a new one.',
-    shortLabel: 'Account',
-    sidebarGroup: 'auth',
-    canSkip: (c) => listOauthAccounts().length === 0 || (!!c.apiKey && !!c.workspace && !!c.project),
-  },
-  'auth-method': {
-    title: 'Authentication',
-    description: 'Choose how to authenticate with Multiplayer.',
-    shortLabel: 'Auth',
-    sidebarGroup: 'auth',
-    canSkip: (c) => !!c.apiKey,
+  progress: {
+    title: 'Setting Up Demo',
+    description: 'Cloning repository, connecting account, and preparing project.',
+    shortLabel: 'Setup',
+    canSkip: (c) => !!c.dir && !!c.isDemoProject && !!c.apiKey && !!(c.workspace && c.project),
   },
   'project-select': {
     title: 'Select Project',
-    description: 'Choose the project this demo will report into.',
+    description: 'Choose the Multiplayer project this demo will report into.',
     shortLabel: 'Project',
-    sidebarGroup: 'auth',
     canSkip: (c) => !!(c.workspace && c.project),
   },
   model: {
@@ -85,30 +59,7 @@ const STEP_DEFS: Record<StepId, StepMeta> = {
 
 const STEPS = Object.keys(STEP_DEFS) as StepId[]
 
-function listOauthAccounts(): string[] {
-  return listAccounts().filter((name) => readCredentials(name).authType === 'oauth')
-}
-
-// ─── Route map ────────────────────────────────────────────────────────────────
-
-function prevStep(current: StepId): StepId | null {
-  switch (current) {
-    case 'clone':
-      return null
-    case 'account-select':
-      return 'clone'
-    case 'auth-method':
-      return listOauthAccounts().length > 0 ? 'account-select' : 'clone'
-    case 'project-select':
-      return 'auth-method'
-    case 'model':
-      return 'project-select'
-    case 'demo-setup':
-      return 'model'
-    case 'connecting':
-      return 'demo-setup'
-  }
-}
+// ─── Route helpers ────────────────────────────────────────────────────────────
 
 function nextStep(after: StepId, config: Partial<AgentConfig>): StepId {
   const idx = STEPS.indexOf(after)
@@ -125,9 +76,18 @@ function firstRequiredStep(config: Partial<AgentConfig>): StepId {
   return 'connecting'
 }
 
-// `clone` runs its own internal lifecycle; pressing Esc inside it goes back to
-// the project-type screen rather than navigating between flow steps.
-const SELF_NAVIGATING_STEPS: Set<StepId> = new Set(['clone', 'project-select'])
+function prevStep(current: StepId): StepId | null {
+  switch (current) {
+    case 'progress': return null
+    case 'project-select': return null
+    case 'model': return 'project-select'
+    case 'demo-setup': return 'model'
+    case 'connecting': return 'demo-setup'
+  }
+}
+
+// project-select navigates itself internally (keyboard captured inside the component).
+const SELF_NAVIGATING_STEPS: Set<StepId> = new Set(['project-select'])
 
 const DEMO_PROJECT_NAME = 'multiplayer-demo'
 
@@ -146,18 +106,20 @@ export function DemoSetupFlow({
   initialConfig,
   profileName,
   initialAccount,
-  authErrorMessage,
   onComplete,
   onBackToTypeSelection,
 }: Props): ReactElement | null {
   const [config, setConfig] = useState<Partial<AgentConfig>>({ ...initialConfig, isDemoProject: true })
   const [step, setStep] = useState<StepId>(() => firstRequiredStep({ ...initialConfig, isDemoProject: true }))
   const [account, setAccount] = useState(initialAccount ?? profileName ?? 'default')
+
+  // Kept for the project-select fallback (multi-workspace users).
   const [oauthWorkspaces, setOauthWorkspaces] = useState<SelectableWorkspace[]>([])
   const [fetchingWorkspaces, setFetchingWorkspaces] = useState(false)
-  const [projectCreating, setProjectCreating] = useState(false)
   const [oauthApi, setOauthApi] = useState<ReturnType<typeof createApiService> | null>(null)
   const demoAutoCreationStartedRef = useRef(false)
+
+  // ── Advance helper ──────────────────────────────────────────────────────────
 
   const advance = useCallback(
     (updates: Partial<AgentConfig>, accountOverride?: string) => {
@@ -173,74 +135,41 @@ export function DemoSetupFlow({
     [config, step, account],
   )
 
-  const handleAuthComplete = useCallback(
-    (updates: Partial<AgentConfig> & { _oauthWorkspaces?: SelectableWorkspace[]; _accountName?: string }) => {
-      if (updates._accountName) setAccount(updates._accountName)
+  // ── Progress screen completion ───────────────────────────────────────────────
 
-      if (updates._oauthWorkspaces) {
-        const workspaces = updates._oauthWorkspaces
-        setOauthWorkspaces(workspaces)
+  const handleProgressComplete = useCallback(
+    (result: DemoProgressResult) => {
+      setAccount(result.accountName)
+      setOauthWorkspaces(result.workspaces)
 
-        const baseConfig = {
-          ...config,
-          apiKey: updates.apiKey,
-          authType: updates.authType,
-          ...(updates.url ? { url: updates.url } : {}),
-        }
-        const resolvedUrl = baseConfig.url || API_URL
-        const api = createApiService({ url: resolvedUrl, apiKey: '', bearerToken: updates.apiKey! })
-        setOauthApi(api)
+      const resolvedUrl = config.url || API_URL
+      setOauthApi(createApiService({ url: resolvedUrl, apiKey: '', bearerToken: result.apiKey }))
 
-        const effectiveAccount = updates._accountName ?? account
-
-        if (workspaces.length === 1) {
-          const ws = workspaces[0]!
-          const existing = ws.projects.find((p) => p.name === DEMO_PROJECT_NAME)
-
-          const applyProject = (proj: { _id: string; name: string }) => {
-            const merged = {
-              ...baseConfig,
-              workspace: ws._id,
-              project: proj._id,
-              workspaceDisplayName: ws.name,
-              projectDisplayName: proj.name,
-            }
-            const extras = persistSetupState(merged, { account: effectiveAccount, isDemoFlow: true })
-            const final = { ...merged, ...extras }
-            setConfig(final)
-            setStep(nextStep(step, final))
-          }
-
-          if (existing) {
-            applyProject(existing)
-          } else {
-            demoAutoCreationStartedRef.current = true
-            setProjectCreating(true)
-            // Persist auth state immediately so a crash during creation doesn't lose the token type.
-            const authExtras = persistSetupState(baseConfig, { account: effectiveAccount, isDemoFlow: true })
-            setConfig({ ...baseConfig, ...authExtras })
-            void api
-              .createProject(ws._id, DEMO_PROJECT_NAME)
-              .then((proj) => {
-                setProjectCreating(false)
-                applyProject(proj)
-              })
-              .catch(() => {
-                setProjectCreating(false)
-                demoAutoCreationStartedRef.current = false
-                setStep('project-select')
-              })
-          }
-        } else {
-          setConfig(baseConfig)
-          setStep('project-select')
-        }
-      } else {
-        advance(updates, updates._accountName)
-      }
+      advance(
+        {
+          dir: result.dir,
+          apiKey: result.apiKey,
+          authType: result.authType,
+          isDemoProject: true,
+          maxConcurrentIssues: result.maxConcurrentIssues ?? DEFAULT_MAX_CONCURRENT,
+          sessionRecorderSetupDone: true,
+          ...(result.workspace
+            ? {
+                workspace: result.workspace,
+                project: result.project,
+                workspaceDisplayName: result.workspaceDisplayName,
+                projectDisplayName: result.projectDisplayName,
+              }
+            : {}),
+          ...(result.model ? { model: result.model, modelKey: result.modelKey } : {}),
+        },
+        result.accountName,
+      )
     },
-    [config, step, account, advance],
+    [config.url, advance],
   )
+
+  // ── Back navigation ─────────────────────────────────────────────────────────
 
   const goBack = useCallback(() => {
     const prev = prevStep(step)
@@ -249,12 +178,14 @@ export function DemoSetupFlow({
   }, [step, onBackToTypeSelection])
 
   useKeyboard(({ name }) => {
-    if (name !== 'escape' || SELF_NAVIGATING_STEPS.has(step) || projectCreating) return
+    if (name !== 'escape' || SELF_NAVIGATING_STEPS.has(step)) return
     goBack()
   })
 
-  // OAuth path: fetch workspaces when landing on project-select with an api key
-  // but no workspaces (e.g. resuming a flow with only the bearer token loaded).
+  // ── Resume fallback: project-select with one workspace ──────────────────────
+  // Fetches workspaces when landing on project-select with a bearer token but
+  // no workspace/project saved (e.g. partial resume after a crash).
+
   useEffect(() => {
     if (step !== 'project-select' || oauthWorkspaces.length > 0 || fetchingWorkspaces) return
     const apiKey = config.apiKey?.trim()
@@ -277,15 +208,13 @@ export function DemoSetupFlow({
         setConfig((c) => ({ ...c, authType: 'oauth' }))
         setOauthWorkspaces(workspaces)
       })
-      .catch(() => {
-        /* empty list handled by ProjectSelectStep */
-      })
+      .catch(() => { /* empty list handled by ProjectSelectStep */ })
       .finally(() => setFetchingWorkspaces(false))
   }, [step])
 
-  // Resume fallback: if we land on project-select with exactly one workspace
-  // (e.g. user has a stored bearer token but no workspace/project saved),
-  // select or create the "multiplayer-demo" project automatically.
+  // Auto-select or create "multiplayer-demo" when exactly one workspace is
+  // available on the project-select screen (resume path for single-workspace
+  // users). Normal path is handled inside DemoProgressScreen.
   //
   // `advance` is intentionally omitted from deps: demoAutoCreationStartedRef
   // guards against double-invocation, so a stale `advance` is never re-called.
@@ -329,7 +258,7 @@ export function DemoSetupFlow({
       })
   }, [step, oauthWorkspaces, oauthApi])
 
-  // Fetch human-readable workspace/project names for the summary card.
+  // Fetch display names for the summary card when workspace/project are known.
   useEffect(() => {
     const url = config.url || API_URL
     const apiKey = config.apiKey?.trim()
@@ -356,17 +285,12 @@ export function DemoSetupFlow({
             ...(projectDisplayName ? { projectDisplayName } : {}),
           }
         })
-      } catch {
-        /* non-fatal */
-      }
+      } catch { /* non-fatal */ }
     })()
-
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [config.apiKey, config.workspace, config.project, config.url])
 
-  // ── Sidebar ───────────────────────────────────────────────────────────────
+  // ── Sidebar ─────────────────────────────────────────────────────────────────
 
   const currentStepIndex = STEPS.indexOf(step)
   const visibleSteps = STEPS.filter((s, i) => {
@@ -386,91 +310,33 @@ export function DemoSetupFlow({
   }
   const currentVisibleIndex = visibleSteps.indexOf(effectiveStep)
 
-  const sidebar: SidebarEntry[] = []
-  const groupsSeen = new Set<string>()
+  const sidebar: SidebarEntry[] = visibleSteps.map((s, i) => ({
+    id: s,
+    label: STEP_DEFS[s].shortLabel,
+    isDone: i < currentVisibleIndex,
+    isCurrent: s === effectiveStep,
+  }))
 
-  for (const s of visibleSteps) {
-    const def = STEP_DEFS[s]
-    const group = def.sidebarGroup
-    if (group) {
-      if (groupsSeen.has(group)) continue
-      groupsSeen.add(group)
-      const lastGroupIdx = visibleSteps.reduce((acc, vs, i) => (STEP_DEFS[vs].sidebarGroup === group ? i : acc), -1)
-      const anyGroupCurrent = visibleSteps.some(
-        (vs) => STEP_DEFS[vs].sidebarGroup === group && vs === effectiveStep,
-      )
-      sidebar.push({
-        id: `group-${group}`,
-        label: 'Auth',
-        isDone: lastGroupIdx < currentVisibleIndex,
-        isCurrent: anyGroupCurrent,
-      })
-    } else {
-      const i = visibleSteps.indexOf(s)
-      sidebar.push({
-        id: s,
-        label: def.shortLabel,
-        isDone: i < currentVisibleIndex,
-        isCurrent: s === effectiveStep,
-      })
-    }
-  }
-
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Render ───────────────────────────────────────────────────────────────────
 
   const meta = STEP_DEFS[step]
-  const banner = authErrorMessage && step === 'auth-method'
-    ? 'Session expired or unauthorized — please sign in again.'
-    : null
-
-  const shellTitle = projectCreating ? 'Setting Up Demo' : meta.title
-  const shellDescription = projectCreating
-    ? `Creating your "${DEMO_PROJECT_NAME}" project…`
-    : meta.description
 
   return (
     <SetupShell
-      title={shellTitle}
-      description={shellDescription}
+      title={meta.title}
+      description={meta.description}
       config={config}
       account={account}
       sidebar={sidebar}
-      banner={banner}
-      showSummary={step !== 'clone'}
+      showSummary={step !== 'progress'}
     >
-      {step === 'clone' && (
-        <DemoCloneStep config={config} onComplete={advance} onBack={onBackToTypeSelection} />
-      )}
-      {step === 'account-select' && (
-        projectCreating ? (
-          <box flexDirection='column' gap={1}>
-            <text fg='#f59e0b'>◌ Creating your demo project…</text>
-          </box>
-        ) : (
-          <AccountSelectStep
-            url={config.url || API_URL}
-            oauthOnly
-            onComplete={handleAuthComplete}
-            onAddNew={() => setStep('auth-method')}
-            onBack={goBack}
-          />
-        )
-      )}
-      {step === 'auth-method' && (
-        projectCreating ? (
-          <box flexDirection='column' gap={1}>
-            <text fg='#f59e0b'>◌ Creating your demo project…</text>
-          </box>
-        ) : (
-          <AuthMethodStep
-            config={config}
-            url={config.url || API_URL}
-            profileName={profileName}
-            oauthOnly
-            onComplete={handleAuthComplete}
-            onBack={goBack}
-          />
-        )
+      {step === 'progress' && (
+        <DemoProgressScreen
+          initialConfig={config}
+          profileName={profileName}
+          onComplete={handleProgressComplete}
+          onBack={onBackToTypeSelection}
+        />
       )}
       {step === 'project-select' && (
         <ProjectSelectStep
@@ -482,9 +348,9 @@ export function DemoSetupFlow({
           onCreateWorkspace={
             oauthApi
               ? async (name, handle) => {
-                const ws = await oauthApi.createWorkspace(name, handle)
-                return { _id: ws._id!, name: ws.name!, projects: [] }
-              }
+                  const ws = await oauthApi.createWorkspace(name, handle)
+                  return { _id: ws._id!, name: ws.name!, projects: [] }
+                }
               : undefined
           }
           onCreateProject={
