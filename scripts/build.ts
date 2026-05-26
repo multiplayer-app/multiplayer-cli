@@ -22,6 +22,9 @@ const targets = single
 
 fs.mkdirSync(path.join(ROOT, 'dist'), { recursive: true })
 
+console.log('Fetching READMEs from GitHub...')
+await $`${process.execPath} run ${path.join(ROOT, 'scripts/fetch-readmes.ts')}`.cwd(ROOT)
+
 console.log('Type-checking...')
 await $`${process.execPath} x tsc --noEmit`.cwd(ROOT)
 

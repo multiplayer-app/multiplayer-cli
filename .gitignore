@@ -42,6 +42,9 @@ dist
 tsconfig.tsbuildinfo
 coverage
 
+# generated at build time
+src/session-recorder/readme-content/
+
 # ignore exported files
 cronjobs/signups/export/
 

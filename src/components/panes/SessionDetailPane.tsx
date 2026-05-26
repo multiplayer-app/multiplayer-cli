@@ -144,7 +144,7 @@ function toolOutputPreviewText(tc: AgentToolCall): string | null {
   if (!out || typeof out !== 'object') return null
   const raw = out.content
   if (typeof raw !== 'string' || !raw.trim()) return null
-  let t = stripAgentDisplayNoise(raw)
+  let t = stripAgentDisplayNoise(stripControlChars(raw))
   if (!t) return null
   if (t.length > TOOL_OUTPUT_MAX_CHARS) t = t.slice(0, TOOL_OUTPUT_MAX_CHARS) + '\n…'
   return t
@@ -550,6 +550,10 @@ const buildMessageRows = (msg: SessionMessage, contentWidth?: number): DetailRow
   let prefixInfo = getContentPrefix(msg)
   if (!prefixInfo && msg.role === 'assistant' && hasAttachments && !hasContent && toolCalls.length === 0) {
     prefixInfo = { text: 'assistant', color: ACCENT }
+  }
+  // Don't show the activity prefix (e.g. "analyzing") for messages that are purely tool calls
+  if (prefixInfo && !hasContent && !hasAttachments && toolCalls.length > 0) {
+    prefixInfo = null
   }
   const fromUser = msg.role === 'user'
 
