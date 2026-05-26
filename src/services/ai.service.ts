@@ -314,6 +314,41 @@ const findSpanById = (traces: unknown[], targetSpanId: string): any => {
   return undefined
 }
 
+export interface SessionSketch {
+  s3Key: string
+  s3Bucket: string
+  title?: string
+}
+
+/** Build a human-readable timeline string from rrweb events. */
+const buildRrwebTimeline = (events: any[]): string => {
+  const lines: string[] = []
+  const startTime = events[0]?.timestamp ?? 0
+  for (const event of events) {
+    const relMs = event.timestamp - startTime
+    const relSec = (relMs / 1000).toFixed(1)
+    // type 4 = Meta (page navigation)
+    if (event.type === 4) {
+      const href = event.data?.href ?? ''
+      if (href) lines.push(`[${relSec}s] Navigation: ${href}`)
+    }
+    // type 3 = IncrementalSnapshot; source 5 = Input, source 14 = Console
+    if (event.type === 3) {
+      if (event.data?.source === 5) {
+        const text = event.data?.text ?? ''
+        if (text) lines.push(`[${relSec}s] Input: ${String(text).slice(0, 120)}`)
+      }
+      if (event.data?.source === 14) {
+        const payload = event.data?.payload
+        const level = payload?.level ?? 'log'
+        const trace = Array.isArray(payload?.trace) ? payload.trace.join(' ') : String(payload?.trace ?? '')
+        if (trace) lines.push(`[${relSec}s] Console.${level}: ${trace.slice(0, 200)}`)
+      }
+    }
+  }
+  return lines.join('\n')
+}
+
 export const fetchIssueDebugContext = async (
   issue: Issue,
   mcpConfig: McpConfig,
@@ -387,6 +422,223 @@ export const fetchIssueDebugContext = async (
   } catch {
     return undefined
   }
+}
+
+/**
+ * Fetch all debug context for a known debug session ID. Used when a session
+ * recording is manually attached to an existing chat — we already know the
+ * session; no issue lookup needed.
+ */
+export const fetchDebugSessionContext = async (
+  debugSessionId: string,
+  workspaceId: string,
+  projectId: string,
+  mcpConfig: McpConfig,
+): Promise<{ context: string; sessionSketches: SessionSketch[] } | undefined> => {
+  try {
+    // Fetch the session to find S3 file URLs if available
+    const sessionUrl = new URL(
+      `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}`,
+      mcpConfig.apiUrl,
+    )
+    const sessionRes = await fetch(sessionUrl.toString(), {
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
+    })
+    if (!sessionRes.ok) return undefined
+    const debugSession = (await sessionRes.json()) as any
+
+    let traces: unknown[] = []
+    let logs: unknown[] = []
+
+    if (debugSession.finishedS3Transfer && Array.isArray(debugSession.s3Files)) {
+      const tracesFile = (debugSession.s3Files as any[]).find((f: any) => f.dataType === 'OTLP_TRACES')
+      const logsFile = (debugSession.s3Files as any[]).find((f: any) => f.dataType === 'OTLP_LOGS')
+      const [tracesData, logsData] = await Promise.all([
+        tracesFile?.url ? fetch(tracesFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
+        logsFile?.url ? fetch(logsFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
+      ])
+      traces = Array.isArray(tracesData) ? tracesData : (tracesData?.data ?? [])
+      logs = Array.isArray(logsData) ? logsData : (logsData?.data ?? [])
+    } else {
+      const tracesUrl = new URL(
+        `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-traces`,
+        mcpConfig.apiUrl,
+      )
+      tracesUrl.searchParams.set('skip', '0')
+      tracesUrl.searchParams.set('limit', '300')
+      const logsUrl = new URL(
+        `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-logs`,
+        mcpConfig.apiUrl,
+      )
+      logsUrl.searchParams.set('skip', '0')
+      logsUrl.searchParams.set('limit', '300')
+      const [tracesRes, logsRes] = await Promise.all([
+        fetch(tracesUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
+        fetch(logsUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
+      ])
+      traces = tracesRes.ok ? ((await tracesRes.json()) as any).data : []
+      logs = logsRes.ok ? ((await logsRes.json()) as any).data : []
+    }
+
+    // Fetch rrweb events and session notes in parallel
+    const rrwebUrl = new URL(
+      `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/rrweb-events`,
+      mcpConfig.apiUrl,
+    )
+    rrwebUrl.searchParams.set('limit', '5000')
+    const notesUrl = new URL(
+      `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/session-notes/context`,
+      mcpConfig.apiUrl,
+    )
+    const [rrwebRes, notesRes] = await Promise.all([
+      fetch(rrwebUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
+      fetch(notesUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
+    ])
+    const rawRrweb = rrwebRes.ok ? ((await rrwebRes.json()) as any) : null
+    const notesData: { notes: unknown[]; sketches: SessionSketch[] } | null = notesRes.ok
+      ? ((await notesRes.json()) as any)
+      : null
+
+    const rrwebEvents: unknown[] = Array.isArray(rawRrweb) ? rawRrweb : (rawRrweb?.data ?? [])
+    const rrwebTimeline = buildRrwebTimeline(rrwebEvents)
+    const sessionNotes = notesData?.notes ?? []
+    const sessionSketches: SessionSketch[] = (notesData?.sketches ?? []) as SessionSketch[]
+
+    return {
+      context: JSON.stringify({ sessionId: debugSessionId, traces, logs, sessionNotes, rrwebTimeline }),
+      sessionSketches,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Build a standalone context document for a manually-attached debug session
+ * (no issue metadata available).
+ */
+export const buildAttachedSessionContextDoc = (
+  debugSessionId: string,
+  debugContext: string,
+): string => {
+  let parsedCtx: { sessionId?: string; traces?: any[]; logs?: any[]; sessionNotes?: any[]; rrwebTimeline?: string } | undefined
+  if (debugContext) {
+    try {
+      parsedCtx = JSON.parse(debugContext)
+    } catch {
+      // non-parseable — proceed without details
+    }
+  }
+
+  const lines: string[] = [
+    '# Attached Session Recording',
+    '',
+    `**Session ID:** \`${debugSessionId}\``,
+  ]
+
+  const capturedLines: string[] = []
+
+  if (parsedCtx) {
+    capturedLines.push('## Debug Session')
+
+    if (Array.isArray(parsedCtx.sessionNotes) && parsedCtx.sessionNotes.length > 0) {
+      capturedLines.push('', '### Session Notes')
+      for (const note of parsedCtx.sessionNotes as any[]) {
+        const text = note.text ?? note.content ?? JSON.stringify(note)
+        const type = note.type ? `[${note.type}] ` : ''
+        capturedLines.push(`- ${type}${safeCapturedText(text)}`)
+      }
+    }
+
+    if (parsedCtx.rrwebTimeline) {
+      capturedLines.push('', '### User Session Replay')
+      capturedLines.push(parsedCtx.rrwebTimeline)
+    }
+
+    if (Array.isArray(parsedCtx.logs) && parsedCtx.logs.length > 0) {
+      capturedLines.push('', `### Logs (${parsedCtx.logs.length} entries)`)
+      const logLines: string[] = []
+      const collectLogs = (items: any[]) => {
+        for (const item of items) {
+          const scopeLogs = item.scopeLogs ?? item.scope_logs ?? []
+          for (const scope of scopeLogs) {
+            for (const record of scope.logRecords ?? scope.log_records ?? []) {
+              const severity = record.severityText ?? record.severity_text ?? ''
+              const body = record.body?.stringValue ?? record.body?.string_value ?? record.body ?? ''
+              if (body) logLines.push(`- **[${safeCapturedText(severity)}]** ${safeCapturedText(body, 200)}`)
+            }
+          }
+        }
+      }
+      collectLogs(parsedCtx.logs)
+      capturedLines.push(...logLines.slice(0, 30))
+      if (logLines.length > 30) capturedLines.push(`  … and ${logLines.length - 30} more log entries`)
+    }
+
+    if (Array.isArray(parsedCtx.traces) && parsedCtx.traces.length > 0) {
+      capturedLines.push(
+        '',
+        '### Raw OTLP Spans',
+        '```json',
+        JSON.stringify(sanitizeCapturedValue(parsedCtx.traces), null, 2),
+        '```',
+      )
+    }
+  }
+
+  if (capturedLines.length > 0) {
+    lines.push('', '## Captured Observability Data', wrapUntrustedObservabilityData(capturedLines.join('\n')))
+  }
+
+  lines.push('', '---', '*Generated by multiplayer debugging agent*')
+  return lines.join('\n')
+}
+
+const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'])
+
+/**
+ * Fetches the content of user-uploaded attachments so the LLM can see them.
+ * - Text/code files: returned as labelled text blocks appended to message content.
+ * - Images: returned as base64 data URLs for vision-capable models.
+ * Silently skips attachments that fail to fetch.
+ */
+export const fetchAttachmentContent = async (
+  attachments: Array<{ name: string; url?: string; mimeType?: string }>,
+): Promise<{ textBlocks: string[]; images: string[] }> => {
+  const textBlocks: string[] = []
+  const images: string[] = []
+
+  await Promise.all(
+    attachments.map(async (attachment) => {
+      const { url, name, mimeType } = attachment
+      if (!url) return
+
+      try {
+        const res = await fetch(url)
+        if (!res.ok) {
+          logger.warn(`fetchAttachmentContent: failed to fetch "${name}" — HTTP ${res.status} (URL may have expired)`)
+          return
+        }
+
+        if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
+          const buf = await res.arrayBuffer()
+          const b64 = Buffer.from(buf).toString('base64')
+          images.push(`data:${mimeType};base64,${b64}`)
+        } else {
+          // Treat everything else as text (code, logs, plain text, etc.)
+          const text = await res.text()
+          if (text.trim()) {
+            textBlocks.push(`<attachment name="${name}">\n${text.slice(0, 50_000)}\n</attachment>`)
+          }
+        }
+      } catch (err) {
+        // Non-fatal — log and continue so the text portion still reaches the agent
+        logger.warn(`fetchAttachmentContent: error fetching "${name}": ${String(err)}`)
+      }
+    }),
+  )
+
+  return { textBlocks, images }
 }
 
 export interface IssueAnalysis {
@@ -1141,13 +1393,22 @@ const continueChatWithOpenAI = async (
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: 'system', content: buildDebuggingSystemPrompt() },
-    ...history.map(
-      (m) =>
-        ({
-          role: m.role,
-          content: m.content,
-        }) as OpenAI.Chat.ChatCompletionMessageParam,
-    ),
+    ...history.map((m): OpenAI.Chat.ChatCompletionMessageParam => {
+      if (m.images?.length) {
+        // Vision: multipart content with text + image URLs (user role only)
+        return {
+          role: 'user',
+          content: [
+            { type: 'text' as const, text: m.content },
+            ...m.images.map((dataUrl) => ({
+              type: 'image_url' as const,
+              image_url: { url: dataUrl },
+            })),
+          ],
+        } satisfies OpenAI.Chat.ChatCompletionUserMessageParam
+      }
+      return { role: m.role, content: m.content }
+    }),
   ]
 
   const { finalContent } = await runOpenAiLoop(client, model, messages, projectDir, abortSignal, callbacks)
@@ -1164,13 +1425,59 @@ const continueChatWithClaudeCode = async (
   if (!history.length) {
     throw new Error('EMPTY_HISTORY')
   }
-  const contextLines = history.slice(0, -1).map((m) => `<${m.role}>\n${m.content}\n</${m.role}>`)
-  const lastMessage = history[history.length - 1]
 
-  const prompt =
+  // For historical context, images become short placeholders — we cannot pass
+  // prior-turn images as content blocks through the XML history serialisation,
+  // and embedding raw base64 in text would waste the entire context window.
+  const serializeHistoryMessage = (m: ConversationMessage): string => {
+    let text = m.content
+    if (m.images?.length) {
+      text += '\n\n' + m.images.map((_, i) => `[Image ${i + 1}: attached]`).join('\n')
+    }
+    return text
+  }
+
+  const contextLines = history.slice(0, -1).map((m) => `<${m.role}>\n${serializeHistoryMessage(m)}\n</${m.role}>`)
+  const lastMessage = history[history.length - 1]!
+
+  // Text portion of the current turn (conversation context + user text)
+  const textContent =
     contextLines.length > 0
-      ? `<conversation_history>\n${contextLines.join('\n\n')}\n</conversation_history>\n\n${lastMessage?.content}`
-      : (lastMessage?.content as string)
+      ? `<conversation_history>\n${contextLines.join('\n\n')}\n</conversation_history>\n\n${lastMessage.content}`
+      : lastMessage.content
+
+  // When the current turn has images, use the multimodal SDKUserMessage form so
+  // Claude receives proper image blocks instead of raw base64 strings in text.
+  const buildPrompt = (): Parameters<typeof query>[0]['prompt'] => {
+    if (!lastMessage.images?.length) return textContent
+
+    const imageBlocks: Anthropic.ImageBlockParam[] = lastMessage.images.map((dataUrl) => {
+      const commaIdx = dataUrl.indexOf(',')
+      const meta = dataUrl.slice(0, commaIdx) // e.g. "data:image/jpeg;base64"
+      const data = dataUrl.slice(commaIdx + 1)
+      const mediaType = meta.replace('data:', '').replace(';base64', '') as
+        | 'image/jpeg'
+        | 'image/png'
+        | 'image/gif'
+        | 'image/webp'
+      return { type: 'image', source: { type: 'base64', media_type: mediaType, data } }
+    })
+
+    const content: Anthropic.ContentBlockParam[] = [
+      { type: 'text', text: textContent },
+      ...imageBlocks,
+    ]
+
+    return (async function* () {
+      yield {
+        type: 'user' as const,
+        message: { role: 'user' as const, content } as Anthropic.MessageParam,
+        parent_tool_use_id: null,
+      }
+    })() as any
+  }
+
+  const prompt = buildPrompt()
 
   let response = ''
   const pendingToolCall: { current: PendingToolCall | null } = {

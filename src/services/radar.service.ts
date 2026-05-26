@@ -193,7 +193,8 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
         const fresh = await getToken()
         // Propagate the refreshed token back onto the shared config object so
         // subsequent HTTP fetch calls (fetchJson/fetchRaw) also use the new token.
-        config.apiKey = fresh
+        // Guard against null/undefined to avoid sending "Bearer null" on auth failure.
+        if (fresh) config.apiKey = fresh
       } catch {
         // Fall through and use the current token
       }

@@ -321,7 +321,15 @@ export class RuntimeController extends EventEmitter {
           role: msg.role,
           content: msg.content ?? '',
           activity: msg.activity,
+          agentName: msg.agentName,
+          attachments: msg.attachments,
         })
+      }
+
+      // When a session recording is attached via the UI, fetch and upload its
+      // full debug context (traces, logs, rrweb, notes) for the agent.
+      if (msg.annotations?.debugSessionId && msg.chat) {
+        void this.handleAttachedDebugSession(msg.chat, msg.annotations.debugSessionId as string)
       }
     })
 
@@ -976,6 +984,16 @@ export class RuntimeController extends EventEmitter {
       this.sessionDetails.set(chatId, detail)
       this.emit('session-detail', chatId, { ...detail })
       this.log('info', `Manual chat session registered: ${chatId}`)
+
+      // Drain any messages that arrived before the context was ready
+      const queued = this.pendingMessages.get(chatId)
+      if (queued?.length) {
+        this.pendingMessages.delete(chatId)
+        this.log('info', `Draining ${queued.length} buffered message(s) for manual chat ${chatId}`)
+        for (const pendingMsg of queued) {
+          void this.handleUserMessage(pendingMsg)
+        }
+      }
       return
     }
 
@@ -1002,9 +1020,27 @@ export class RuntimeController extends EventEmitter {
       // Non-fatal — proceed with empty history
     }
 
-    const history: ConversationMessage[] = apiMessages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    // Build conversation history, fetching attachment content for user messages
+    // so the LLM has the full context from prior turns (text files, images, etc.).
+    const history: ConversationMessage[] = await Promise.all(
+      apiMessages
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map(async (m): Promise<ConversationMessage> => {
+          if (m.role === 'user' && m.attachments?.length) {
+            try {
+              const { textBlocks, images } = await AiService.fetchAttachmentContent(
+                m.attachments.map((a) => ({ name: a.name, url: a.url, mimeType: a.mimeType })),
+              )
+              let content = m.content
+              if (textBlocks.length) content = `${content}\n\n${textBlocks.join('\n\n')}`
+              return { role: 'user', content, ...(images.length ? { images } : {}) }
+            } catch {
+              // Non-fatal — fall back to text-only
+            }
+          }
+          return { role: m.role as 'user' | 'assistant', content: m.content }
+        }),
+    )
 
     // Prepend context doc to history so AI has issue context on continue
     const contextAttachment = apiMessages.flatMap((m) => m.attachments ?? []).find((a) => a.type === 'context' && a.url)
@@ -1320,9 +1356,27 @@ export class RuntimeController extends EventEmitter {
       // Non-fatal — proceed with empty history
     }
 
-    const history: ConversationMessage[] = apiMessages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    // Build history with attachment content so the LLM retains full context
+    // from prior turns when resuming a session.
+    const history: ConversationMessage[] = await Promise.all(
+      apiMessages
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map(async (m): Promise<ConversationMessage> => {
+          if (m.role === 'user' && m.attachments?.length) {
+            try {
+              const { textBlocks, images } = await AiService.fetchAttachmentContent(
+                m.attachments.map((a) => ({ name: a.name, url: a.url, mimeType: a.mimeType })),
+              )
+              let content = m.content
+              if (textBlocks.length) content = `${content}\n\n${textBlocks.join('\n\n')}`
+              return { role: 'user', content, ...(images.length ? { images } : {}) }
+            } catch {
+              // Non-fatal — fall back to text-only
+            }
+          }
+          return { role: m.role as 'user' | 'assistant', content: m.content }
+        }),
+    )
 
     // If this chat already has history, it was previously processed.
     // Restore context only — do not re-run full issue resolution.
@@ -1529,6 +1583,73 @@ export class RuntimeController extends EventEmitter {
           this.emit('quit')
         }
       }
+    }
+  }
+
+  /**
+   * Called when the UI attaches a session recording to an existing chat.
+   * Fetches the full debug context for the session (traces, logs, rrweb, notes),
+   * uploads a context doc, and emits it back to the chat so the agent can use it.
+   */
+  private async handleAttachedDebugSession(chatId: string, debugSessionId: string): Promise<void> {
+    const cfg = this._config
+    const radar = this.radar
+    const workspaceId = cfg.workspace
+    const projectId = cfg.project
+
+    if (!radar || !workspaceId || !projectId) return
+
+    this.log('info', `Fetching debug context for attached session ${debugSessionId} in chat ${chatId}`)
+
+    try {
+      const mcpConfig = { apiKey: cfg.apiKey, apiUrl: cfg.url, authType: cfg.authType }
+      const result = await AiService.fetchDebugSessionContext(debugSessionId, workspaceId, projectId, mcpConfig)
+      if (!result) {
+        this.log('info', `No debug context returned for session ${debugSessionId}`)
+        return
+      }
+
+      const markdown = AiService.buildAttachedSessionContextDoc(debugSessionId, result.context)
+      const attachment = await radar.uploadContextDoc(workspaceId, projectId, chatId, markdown)
+      if (attachment) {
+        radar.emitAgentMessage({
+          chat: chatId,
+          role: 'assistant',
+          content: '',
+          agentName: cfg.name,
+          attachments: [attachment],
+        })
+      }
+
+      if (result.sessionSketches.length > 0) {
+        radar.emitAgentMessage({
+          chat: chatId,
+          role: 'assistant',
+          content: '',
+          agentName: cfg.name,
+          attachments: result.sessionSketches.map((s) => ({
+            type: 'file' as const,
+            name: s.title ?? 'Session sketch',
+            mimeType: 'image/png',
+            metadata: {
+              s3Key: s.s3Key,
+              s3Bucket: s.s3Bucket,
+            },
+          })),
+        })
+      }
+
+      // Add the context doc to the in-memory conversation history so the LLM
+      // can reference it in the next user turn.
+      const context = this.chatContexts.get(chatId)
+      if (context) {
+        context.history.push({
+          role: 'assistant',
+          content: markdown,
+        })
+      }
+    } catch (err) {
+      this.log('error', `Failed to fetch debug context for session ${debugSessionId}: ${getErrorMessage(err)}`)
     }
   }
 
@@ -1769,7 +1890,24 @@ export class RuntimeController extends EventEmitter {
 
     const cfg = this._config
     const dirs = this.getDirs(chatId)
-    context.history.push({ role: 'user', content })
+
+    // Fetch any user-uploaded attachments and embed them in the history entry
+    // so the LLM sees their content (text files inline, images as base64).
+    let messageContent = content
+    let messageImages: string[] | undefined
+    if (msg.attachments?.length) {
+      const { textBlocks, images } = await AiService.fetchAttachmentContent(
+        msg.attachments.map((a) => ({ name: a.name, url: a.url, mimeType: a.mimeType })),
+      )
+      if (textBlocks.length) {
+        messageContent = `${content}\n\n${textBlocks.join('\n\n')}`
+      }
+      if (images.length) {
+        messageImages = images
+      }
+    }
+
+    context.history.push({ role: 'user', content: messageContent, images: messageImages })
 
     const abortController = new AbortController()
     context.abortController = abortController
