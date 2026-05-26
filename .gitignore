@@ -43,7 +43,7 @@ tsconfig.tsbuildinfo
 coverage
 
 # generated at build time
-src/session-recorder/readme-content/
+src/session-recorder/readme-content.generated.ts
 
 # ignore exported files
 cronjobs/signups/export/
