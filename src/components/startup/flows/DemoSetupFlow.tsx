@@ -129,13 +129,7 @@ function firstRequiredStep(config: Partial<AgentConfig>): StepId {
 // the project-type screen rather than navigating between flow steps.
 const SELF_NAVIGATING_STEPS: Set<StepId> = new Set(['clone', 'project-select'])
 
-function findUniqueDemoProjectName(existingProjects: Array<{ name: string }>): string {
-  const names = new Set(existingProjects.map((p) => p.name.toLowerCase()))
-  if (!names.has('demo-app')) return 'demo-app'
-  let i = 1
-  while (names.has(`demo-app-${i}`)) i++
-  return `demo-app-${i}`
-}
+const DEMO_PROJECT_NAME = 'multiplayer-demo'
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -161,6 +155,7 @@ export function DemoSetupFlow({
   const [account, setAccount] = useState(initialAccount ?? profileName ?? 'default')
   const [oauthWorkspaces, setOauthWorkspaces] = useState<SelectableWorkspace[]>([])
   const [fetchingWorkspaces, setFetchingWorkspaces] = useState(false)
+  const [projectCreating, setProjectCreating] = useState(false)
   const [oauthApi, setOauthApi] = useState<ReturnType<typeof createApiService> | null>(null)
   const demoAutoCreationStartedRef = useRef(false)
 
@@ -185,21 +180,66 @@ export function DemoSetupFlow({
       if (updates._oauthWorkspaces) {
         const workspaces = updates._oauthWorkspaces
         setOauthWorkspaces(workspaces)
-        const next = {
+
+        const baseConfig = {
           ...config,
           apiKey: updates.apiKey,
           authType: updates.authType,
           ...(updates.url ? { url: updates.url } : {}),
         }
-        setConfig(next)
-        const resolvedUrl = next.url || API_URL
-        setOauthApi(createApiService({ url: resolvedUrl, apiKey: '', bearerToken: updates.apiKey! }))
-        setStep('project-select')
+        const resolvedUrl = baseConfig.url || API_URL
+        const api = createApiService({ url: resolvedUrl, apiKey: '', bearerToken: updates.apiKey! })
+        setOauthApi(api)
+
+        const effectiveAccount = updates._accountName ?? account
+
+        if (workspaces.length === 1) {
+          const ws = workspaces[0]!
+          const existing = ws.projects.find((p) => p.name === DEMO_PROJECT_NAME)
+
+          const applyProject = (proj: { _id: string; name: string }) => {
+            const merged = {
+              ...baseConfig,
+              workspace: ws._id,
+              project: proj._id,
+              workspaceDisplayName: ws.name,
+              projectDisplayName: proj.name,
+            }
+            const extras = persistSetupState(merged, { account: effectiveAccount, isDemoFlow: true })
+            const final = { ...merged, ...extras }
+            setConfig(final)
+            setStep(nextStep(step, final))
+          }
+
+          if (existing) {
+            applyProject(existing)
+          } else {
+            demoAutoCreationStartedRef.current = true
+            setProjectCreating(true)
+            // Persist auth state immediately so a crash during creation doesn't lose the token type.
+            const authExtras = persistSetupState(baseConfig, { account: effectiveAccount, isDemoFlow: true })
+            setConfig({ ...baseConfig, ...authExtras })
+            void api
+              .createProject(ws._id, DEMO_PROJECT_NAME)
+              .then((proj) => {
+                setProjectCreating(false)
+                applyProject(proj)
+              })
+              .catch(() => {
+                setProjectCreating(false)
+                demoAutoCreationStartedRef.current = false
+                setStep('project-select')
+              })
+          }
+        } else {
+          setConfig(baseConfig)
+          setStep('project-select')
+        }
       } else {
         advance(updates, updates._accountName)
       }
     },
-    [config, advance],
+    [config, step, account, advance],
   )
 
   const goBack = useCallback(() => {
@@ -209,7 +249,7 @@ export function DemoSetupFlow({
   }, [step, onBackToTypeSelection])
 
   useKeyboard(({ name }) => {
-    if (name !== 'escape' || SELF_NAVIGATING_STEPS.has(step)) return
+    if (name !== 'escape' || SELF_NAVIGATING_STEPS.has(step) || projectCreating) return
     goBack()
   })
 
@@ -243,8 +283,13 @@ export function DemoSetupFlow({
       .finally(() => setFetchingWorkspaces(false))
   }, [step])
 
-  // Demo auto-create: when exactly one workspace is available, skip project
-  // selection and create a fresh demo-app project automatically.
+  // Resume fallback: if we land on project-select with exactly one workspace
+  // (e.g. user has a stored bearer token but no workspace/project saved),
+  // select or create the "multiplayer-demo" project automatically.
+  //
+  // `advance` is intentionally omitted from deps: demoAutoCreationStartedRef
+  // guards against double-invocation, so a stale `advance` is never re-called.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (
       step !== 'project-select' ||
@@ -255,10 +300,21 @@ export function DemoSetupFlow({
 
     demoAutoCreationStartedRef.current = true
     const ws = oauthWorkspaces[0]!
-    const projectName = findUniqueDemoProjectName(ws.projects)
+    const existing = ws.projects.find((p) => p.name === DEMO_PROJECT_NAME)
+
+    if (existing) {
+      advance({
+        workspace: ws._id,
+        project: existing._id,
+        workspaceDisplayName: ws.name,
+        projectDisplayName: existing.name,
+      })
+      return
+    }
+
     setFetchingWorkspaces(true)
     void oauthApi
-      .createProject(ws._id, projectName)
+      .createProject(ws._id, DEMO_PROJECT_NAME)
       .then((proj) => {
         advance({
           workspace: ws._id,
@@ -367,10 +423,15 @@ export function DemoSetupFlow({
     ? 'Session expired or unauthorized — please sign in again.'
     : null
 
+  const shellTitle = projectCreating ? 'Setting Up Demo' : meta.title
+  const shellDescription = projectCreating
+    ? `Creating your "${DEMO_PROJECT_NAME}" project…`
+    : meta.description
+
   return (
     <SetupShell
-      title={meta.title}
-      description={meta.description}
+      title={shellTitle}
+      description={shellDescription}
       config={config}
       account={account}
       sidebar={sidebar}
@@ -381,23 +442,35 @@ export function DemoSetupFlow({
         <DemoCloneStep config={config} onComplete={advance} onBack={onBackToTypeSelection} />
       )}
       {step === 'account-select' && (
-        <AccountSelectStep
-          url={config.url || API_URL}
-          oauthOnly
-          onComplete={handleAuthComplete}
-          onAddNew={() => setStep('auth-method')}
-          onBack={goBack}
-        />
+        projectCreating ? (
+          <box flexDirection='column' gap={1}>
+            <text fg='#f59e0b'>◌ Creating your demo project…</text>
+          </box>
+        ) : (
+          <AccountSelectStep
+            url={config.url || API_URL}
+            oauthOnly
+            onComplete={handleAuthComplete}
+            onAddNew={() => setStep('auth-method')}
+            onBack={goBack}
+          />
+        )
       )}
       {step === 'auth-method' && (
-        <AuthMethodStep
-          config={config}
-          url={config.url || API_URL}
-          profileName={profileName}
-          oauthOnly
-          onComplete={handleAuthComplete}
-          onBack={goBack}
-        />
+        projectCreating ? (
+          <box flexDirection='column' gap={1}>
+            <text fg='#f59e0b'>◌ Creating your demo project…</text>
+          </box>
+        ) : (
+          <AuthMethodStep
+            config={config}
+            url={config.url || API_URL}
+            profileName={profileName}
+            oauthOnly
+            onComplete={handleAuthComplete}
+            onBack={goBack}
+          />
+        )
       )}
       {step === 'project-select' && (
         <ProjectSelectStep
