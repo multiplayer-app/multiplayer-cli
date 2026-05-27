@@ -90,7 +90,7 @@ const probeClaudeLoginViaCli = (loginError: Error): Promise<void> => {
   })
 }
 
-export const checkClaudeRequirements = async (): Promise<void> => {
+export const checkClaudeRequirements = async (model?: string): Promise<void> => {
   claudeAuthLog('[claude-auth] checking Claude Code requirements')
 
   try {
@@ -104,16 +104,66 @@ export const checkClaudeRequirements = async (): Promise<void> => {
   // An ANTHROPIC_API_KEY bypasses interactive login — no probe needed.
   if (process.env.ANTHROPIC_API_KEY) {
     claudeAuthLog('[claude-auth] ANTHROPIC_API_KEY is set — skipping interactive login probe')
-    return
+  } else {
+    const loginError = new Error(
+      'Claude Code is not authenticated.\n' +
+        'Open a new terminal, run "claude" and complete login, then press Retry.',
+    )
+    await probeClaudeLoginViaCli(loginError)
   }
 
-  const loginError = new Error(
-    'Claude Code is not authenticated.\n' + 'Open a new terminal, run "claude" and complete login, then press Retry.',
-  )
-
-  await probeClaudeLoginViaCli(loginError)
+  await verifyClaudeModel(model)
 }
 
+/**
+ * Verifies an explicitly-selected Claude model is actually usable by running a
+ * minimal single-turn query through the Claude Code SDK. This catches an invalid
+ * or unavailable model name (e.g. a non-existent version) at startup instead of
+ * at the first chat turn. Skipped for the default 'claude-code' (Claude Code
+ * picks its own model) and for non-Anthropic models.
+ */
+export const verifyClaudeModel = async (model?: string): Promise<void> => {
+  if (!model || model === 'claude-code' || !isAnthropicModel(model)) return
+
+  claudeAuthLog(`[claude-auth] verifying model ${model}`)
+  let modelError: string | null = null
+  try {
+    for await (const message of query({
+      prompt: 'hi',
+      options: {
+        cwd: process.cwd(),
+        executable: 'node',
+        pathToClaudeCodeExecutable: cliPath,
+        permissionMode: 'bypassPermissions',
+        settingSources: [],
+        maxTurns: 1,
+        model,
+      },
+    })) {
+      const msg = message as any
+      if (msg.type === 'result' && msg.subtype !== 'success') {
+        const errors: string[] = msg.errors ?? []
+        modelError = errors.length > 0 ? errors.join('; ') : String(msg.subtype)
+        break
+      }
+    }
+  } catch (err) {
+    modelError = err instanceof Error ? err.message : String(err)
+  }
+
+  if (modelError) {
+    claudeAuthLog(`[claude-auth] model ${model} verification failed: ${modelError}`)
+    throw new Error(
+      `Selected model "${model}" is unavailable or failed verification:\n${modelError}\n\n` +
+        'Pick a different model with --model.',
+    )
+  }
+  claudeAuthLog(`[claude-auth] model ${model} verified`)
+}
+
+// Requires an Anthropic API key (modelKey or ANTHROPIC_API_KEY). Claude Code
+// OAuth/subscription users have neither, so the SDK can't authenticate and this
+// returns [] — callers fall back to a static model list. Empty is expected, not a bug.
 export const fetchAnthropicModels = async (modelKey?: string): Promise<string[]> => {
   try {
     const client = new Anthropic(modelKey ? { apiKey: modelKey } : {})
@@ -134,7 +184,7 @@ export const fetchAnthropicModels = async (modelKey?: string): Promise<string[]>
   }
 }
 
-export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string): Promise<void> => {
+export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string, model?: string): Promise<void> => {
   if (!apiKey) {
     throw new Error('AI API key is required for OpenAI-compatible models')
   }
@@ -142,8 +192,10 @@ export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string):
     apiKey,
     ...(baseUrl ? { baseURL: baseUrl } : {}),
   })
+  let modelIds: string[]
   try {
-    await client.models.list()
+    const page = await client.models.list()
+    modelIds = page.data.map((m) => m.id)
   } catch (err: any) {
     const msg: string = err?.message || String(err)
     const lower = msg.toLowerCase()
@@ -151,6 +203,12 @@ export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string):
       throw new Error('Invalid AI API key — authentication failed')
     }
     throw new Error(`AI API key validation failed: ${msg}`)
+  }
+
+  // Only gate on the model when the provider actually returns a list — some
+  // OpenAI-compatible endpoints return nothing, and we shouldn't false-fail there.
+  if (model && modelIds.length > 0 && !modelIds.includes(model)) {
+    throw new Error(`Selected model "${model}" is not available from this provider. Pick a different model with --model.`)
   }
 }
 
@@ -1262,11 +1320,12 @@ const resolveIssueWithOpenAI = async (
   baseUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
+  isDemoProject?: boolean,
 ): Promise<FilePatch[]> => {
   const client = buildOpenAiClient(apiKey, model, baseUrl)
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildDebuggingSystemPrompt() },
+    { role: 'system', content: buildDebuggingSystemPrompt(undefined, isDemoProject) },
     { role: 'user', content: prompt },
   ]
 
@@ -1305,6 +1364,7 @@ const resolveIssueWithClaudeCode = async (
   model: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
+  isDemoProject?: boolean,
 ): Promise<FilePatch[]> => {
   const absProjectDir = path.resolve(projectDir)
   const git = simpleGit(absProjectDir)
@@ -1339,7 +1399,7 @@ const resolveIssueWithClaudeCode = async (
       systemPrompt: {
         type: 'preset',
         preset: 'claude_code',
-        append: buildClaudeCodeDebuggingSystemPrompt(absProjectDir),
+        append: buildClaudeCodeDebuggingSystemPrompt(absProjectDir, isDemoProject),
       },
       maxTurns: 1000,
       includePartialMessages: !!(callbacks.onProgress || callbacks.onToolCall),
@@ -1553,11 +1613,12 @@ export const resolveIssue = async (
   modelUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
+  isDemoProject?: boolean,
 ): Promise<FilePatch[]> => {
   if (model === 'claude-code' || isAnthropicModel(model)) {
     // Claude Code SDK handles tool execution internally — confirmation dialogs are not supported
     const claudeModel = model === 'claude-code' ? undefined : model
-    return resolveIssueWithClaudeCode(issue, projectDir, prompt, claudeModel, abortSignal, callbacks)
+    return resolveIssueWithClaudeCode(issue, projectDir, prompt, claudeModel, abortSignal, callbacks, isDemoProject)
   }
 
   const patches = await resolveIssueWithOpenAI(
@@ -1569,6 +1630,7 @@ export const resolveIssue = async (
     modelUrl ?? getProviderDefaultBaseUrl(model),
     abortSignal,
     callbacks,
+    isDemoProject,
   )
 
   if (patches.length > 0) {

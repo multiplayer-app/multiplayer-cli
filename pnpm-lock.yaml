@@ -106,23 +106,23 @@ importers:
         version: 4.4.3
     optionalDependencies:
       '@multiplayer-app/cli-darwin-arm64':
-        specifier: 2.0.94
-        version: 2.0.94
+        specifier: 2.0.95
+        version: 2.0.95
       '@multiplayer-app/cli-darwin-x64':
-        specifier: 2.0.94
-        version: 2.0.94
+        specifier: 2.0.95
+        version: 2.0.95
       '@multiplayer-app/cli-linux-arm64':
-        specifier: 2.0.94
-        version: 2.0.94
+        specifier: 2.0.95
+        version: 2.0.95
       '@multiplayer-app/cli-linux-x64':
-        specifier: 2.0.94
-        version: 2.0.94
+        specifier: 2.0.95
+        version: 2.0.95
       '@multiplayer-app/cli-windows-arm64':
-        specifier: 2.0.94
-        version: 2.0.94
+        specifier: 2.0.95
+        version: 2.0.95
       '@multiplayer-app/cli-windows-x64':
-        specifier: 2.0.94
-        version: 2.0.94
+        specifier: 2.0.95
+        version: 2.0.95
 
 packages:
 
@@ -443,38 +443,38 @@ packages:
   '@mongodb-js/saslprep@1.4.11':
     resolution: {integrity: sha512-o9rAHc0IpIjuPSxRutWpE1F62x7n+4mVS4rCNHkzhIUMQcc18bb6xEq5wd2NdN0WjepIyXIppRshYI2kQDOZVA==}
 
-  '@multiplayer-app/cli-darwin-arm64@2.0.94':
-    resolution: {integrity: sha512-78j8ScMho0bA7JMvQVBHklPtWy1aHRgzGRXngS17xnJYNVLGNMIKCERDuxeEIwLFtJaTUzHFeg3jQoRwUggoQA==}
+  '@multiplayer-app/cli-darwin-arm64@2.0.95':
+    resolution: {integrity: sha512-oCaDB8MDH3Qo0UFP6ZV3L1mIIHU275pcRqUKK1PR4tiKZ4cW0d5CWZVZsb5MzYQk24mEc/YE6tOCQKj/ZcfJ2A==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@multiplayer-app/cli-darwin-x64@2.0.94':
-    resolution: {integrity: sha512-tUKLEYvoP2wjRtZWHkZnOoaQZuk5xCQb75zfa6kRrMZTreshJVS2qTxQs1cwNNT25Cez9f01FHXUWO8ntapAGA==}
+  '@multiplayer-app/cli-darwin-x64@2.0.95':
+    resolution: {integrity: sha512-h8kPC4Thk38MhbIctqAA9cPEbkrK7QeQqMjPeE8yuTmKsX7U91oZOPyEop4UJQQin2SA2oHjEKGkL42ORmz9Pw==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@multiplayer-app/cli-linux-arm64@2.0.94':
-    resolution: {integrity: sha512-sDudeC/syO7oEnWLyqYvi7g1fdNzoerAFTwW4QfUiKQjrgcnhdAVcgXxBJf4aGSjtj4Sa4eMW3YsAjaoQWjU1Q==}
+  '@multiplayer-app/cli-linux-arm64@2.0.95':
+    resolution: {integrity: sha512-vWBZC2mSqC/ZwFbjoKOiiaqLH3ljU8q5u4LMh6FboCynok4aCg1LizPrFbuCBgk6mcSncQiEONYX4H5glimX4w==}
     cpu: [arm64]
     os: [linux]
     hasBin: true
 
-  '@multiplayer-app/cli-linux-x64@2.0.94':
-    resolution: {integrity: sha512-e1dtgB81VHbJsPbIbNDIYg4zXGdNmhi2nASIMGhZefhgSfx9J8CP6nt3IE4ai4uVb+Sb2SHIt2TDgQajcmxFZw==}
+  '@multiplayer-app/cli-linux-x64@2.0.95':
+    resolution: {integrity: sha512-SzRhcWyruZnmblFXP5uxJNkf1RO4K+jIgLP6xigWmvkHBS1J/BnibpX7vqalktM1ij85hZSqwk2VL/4uHVGFFQ==}
     cpu: [x64]
     os: [linux]
     hasBin: true
 
-  '@multiplayer-app/cli-windows-arm64@2.0.94':
-    resolution: {integrity: sha512-MvL65I+zm5zbGGLi4N0Ycx8r5NrGOuQ75kNWkX0e4vzXwxhko04+zmEOfC54IVjvNobk+cr3k0tU/HaH2A9yow==}
+  '@multiplayer-app/cli-windows-arm64@2.0.95':
+    resolution: {integrity: sha512-gq2+yS6+b4goy93nchnfz/Y453NSjl57bK1WGAzXjX+lDmt1XuCdGpwnzpmfWQVANC9+zmdjY36WHd0zgCJbjw==}
     cpu: [arm64]
     os: [win32]
     hasBin: true
 
-  '@multiplayer-app/cli-windows-x64@2.0.94':
-    resolution: {integrity: sha512-cp0Fe7irakWk8llNn/mBvqRWB8MJgFSz6VhIlY3EEGvvzY8uAyNS3ivK8hD8vjCMcXUAAAZ+S0QLVMA/M8E98g==}
+  '@multiplayer-app/cli-windows-x64@2.0.95':
+    resolution: {integrity: sha512-NrjcxiJ1oketR9L6WL5nmW889KYHGwdW0hXsrZAEXyGS54xusipdgOiySkE9TYdsK9aCkPmxB6vIRWebPY/2cA==}
     cpu: [x64]
     os: [win32]
     hasBin: true
@@ -2153,22 +2153,22 @@ snapshots:
     dependencies:
       sparse-bitfield: 3.0.3
 
-  '@multiplayer-app/cli-darwin-arm64@2.0.94':
+  '@multiplayer-app/cli-darwin-arm64@2.0.95':
     optional: true
 
-  '@multiplayer-app/cli-darwin-x64@2.0.94':
+  '@multiplayer-app/cli-darwin-x64@2.0.95':
     optional: true
 
-  '@multiplayer-app/cli-linux-arm64@2.0.94':
+  '@multiplayer-app/cli-linux-arm64@2.0.95':
     optional: true
 
-  '@multiplayer-app/cli-linux-x64@2.0.94':
+  '@multiplayer-app/cli-linux-x64@2.0.95':
     optional: true
 
-  '@multiplayer-app/cli-windows-arm64@2.0.94':
+  '@multiplayer-app/cli-windows-arm64@2.0.95':
     optional: true
 
-  '@multiplayer-app/cli-windows-x64@2.0.94':
+  '@multiplayer-app/cli-windows-x64@2.0.95':
     optional: true
 
   '@noble/hashes@1.8.0': {}

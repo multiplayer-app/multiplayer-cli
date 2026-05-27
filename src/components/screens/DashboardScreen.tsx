@@ -5,11 +5,12 @@ import type { RuntimeState, SessionDetail } from '../../runtime/types.js'
 import type { AgentConfig, AgentChatStatus, LogEntry, IAgent } from '../../types/index.js'
 import type { GitSettings } from '../../cli/profile.js'
 import { SettingsPanel } from '../SettingsPanel.js'
+import { ModelPanel } from '../ModelPanel.js'
 import { DashboardHeader } from '../DashboardHeader.js'
 import { SessionListPane } from '../panes/SessionListPane.js'
 import { SessionDetailPane } from '../panes/SessionDetailPane.js'
 import { dashboardSettingsHint } from '../panes/FooterHints.js'
-import { ChatComposer } from '../ChatComposer.js'
+import { ChatComposer, type SlashCommand } from '../ChatComposer.js'
 import { ContextSidebar } from '../ContextSidebar.js'
 import { LogsDock } from '../LogsDock.js'
 import { StatusBar, type StatusBarHint } from '../StatusBar.js'
@@ -49,6 +50,7 @@ interface Props {
   suspendKeyboard?: boolean
   onEmitAgentSettings?: (settings: Partial<NonNullable<IAgent['settings']>>) => void
   onUpdateGitSettings?: (git: GitSettings) => void
+  onUpdateModel?: (updates: Partial<AgentConfig>) => void
   onLoadRadarLists?: () => Promise<{ components: string[]; environments: string[] }>
 }
 
@@ -72,6 +74,7 @@ export function DashboardScreen({
   suspendKeyboard = false,
   onEmitAgentSettings,
   onUpdateGitSettings,
+  onUpdateModel,
   onLoadRadarLists
 }: Props): ReactElement {
   // ── Dimensions ──────────────────────────────────────────────────────────────
@@ -95,6 +98,7 @@ export function DashboardScreen({
   const [showLogs, setShowLogs] = useState(false)
   const [narrowShowsDetail, setNarrowShowsDetail] = useState(false)
   const [showSettingsPanel, setShowSettingsPanel] = useState(false)
+  const [showModelPanel, setShowModelPanel] = useState(false)
   const [radarComponents, setRadarComponents] = useState<string[]>([])
   const [radarEnvironments, setRadarEnvironments] = useState<string[]>([])
   const [radarListError, setRadarListError] = useState<string | null>(null)
@@ -102,6 +106,10 @@ export function DashboardScreen({
   const [settingsSnapshot, setSettingsSnapshot] = useState<Partial<NonNullable<IAgent['settings']>>>({})
   const [gitSettings, setGitSettings] = useState<GitSettings>(() => config.git ?? {})
   const [demoState, setDemoState] = useState<DemoState>(() => demoProcess.getState())
+  /** Live model selection, mirrored locally so the header updates immediately on change. */
+  const [modelSettings, setModelSettings] = useState<Partial<Pick<AgentConfig, 'model' | 'modelKey' | 'modelUrl'>>>(
+    () => ({ model: config.model, modelKey: config.modelKey, modelUrl: config.modelUrl })
+  )
 
   // ── Derived values ──────────────────────────────────────────────────────────
 
@@ -204,6 +212,24 @@ export function DashboardScreen({
       })
   }, [onEmitAgentSettings, onLoadRadarLists])
 
+  const openModelPanel = useCallback(() => {
+    if (!onUpdateModel) return
+    setShowModelPanel(true)
+  }, [onUpdateModel])
+
+  const applyModel = useCallback(
+    (updates: Partial<AgentConfig>) => {
+      setModelSettings({ model: updates.model, modelKey: updates.modelKey, modelUrl: updates.modelUrl })
+      onUpdateModel?.(updates)
+    },
+    [onUpdateModel]
+  )
+
+  const headerConfig = useMemo(
+    () => ({ ...config, model: modelSettings.model ?? config.model }),
+    [config, modelSettings.model]
+  )
+
   const toggleNarrowStack = useCallback(() => {
     if (!isNarrow || !selectedDetail) return
     setNarrowShowsDetail((show) => {
@@ -213,12 +239,49 @@ export function DashboardScreen({
     })
   }, [isNarrow, selectedDetail])
 
+  // ── Slash commands ──────────────────────────────────────────────────────────
+
+  const slashCommands = useMemo((): SlashCommand[] => {
+    const cmds: SlashCommand[] = []
+    if (onUpdateModel) cmds.push({ command: 'model', description: 'open model selector' })
+    cmds.push({ command: 'logs', description: showLogs ? 'hide logs' : 'toggle logs' })
+    if (onEmitAgentSettings && onLoadRadarLists) cmds.push({ command: 'settings', description: 'open settings' })
+    cmds.push({ command: 'setup', description: 'restart setup' })
+    cmds.push({ command: 'quit', description: 'quit' })
+    return cmds
+  }, [onUpdateModel, showLogs, onEmitAgentSettings, onLoadRadarLists])
+
+  const handleCommand = useCallback(
+    (command: string): boolean => {
+      switch (command) {
+        case 'model':
+          if (onUpdateModel) { openModelPanel(); return true }
+          return false
+        case 'logs':
+          toggleLogs()
+          return true
+        case 'settings':
+          if (onEmitAgentSettings && onLoadRadarLists) { openSettingsPanel(); return true }
+          return false
+        case 'setup':
+          onRestartSetupRequest()
+          return true
+        case 'quit':
+          onQuitRequest()
+          return true
+        default:
+          return false
+      }
+    },
+    [onUpdateModel, openModelPanel, toggleLogs, onEmitAgentSettings, onLoadRadarLists, openSettingsPanel, onRestartSetupRequest, onQuitRequest]
+  )
+
   // ── Keyboard ────────────────────────────────────────────────────────────────
 
   useKeyboard(
     useCallback(
       (key: KeyEvent) => {
-        if (suspendKeyboard || showSettingsPanel) return
+        if (suspendKeyboard || showSettingsPanel || showModelPanel) return
         const { name } = key
 
         // ── Global shortcuts ──────────────────────────────────────────────
@@ -259,6 +322,14 @@ export function DashboardScreen({
         if (name === 's' || name === 'S') {
           if (onEmitAgentSettings && onLoadRadarLists) {
             openSettingsPanel()
+            key.stopPropagation()
+          }
+          return
+        }
+
+        if (name === 'm' || name === 'M') {
+          if (onUpdateModel) {
+            openModelPanel()
             key.stopPropagation()
           }
           return
@@ -319,9 +390,12 @@ export function DashboardScreen({
         isNarrow,
         toggleNarrowStack,
         showSettingsPanel,
+        showModelPanel,
         onEmitAgentSettings,
         onLoadRadarLists,
         openSettingsPanel,
+        onUpdateModel,
+        openModelPanel,
         config.isDemoProject,
         toggleDemo
       ]
@@ -367,6 +441,10 @@ export function DashboardScreen({
       base.push({ id: 'demo', keys: 'd', label: demoLabel, onPress: toggleDemo })
     }
 
+    if (onUpdateModel) {
+      base.push({ id: 'model', keys: 'm', label: 'model', onPress: openModelPanel })
+    }
+
     base.push(
       { id: 'logs', keys: 'l', label: showLogs ? 'hide logs' : 'logs', onPress: toggleLogs },
       { id: 'setup', keys: 'r', label: 'setup', onPress: onRestartSetupRequest },
@@ -392,6 +470,8 @@ export function DashboardScreen({
     onEmitAgentSettings,
     onLoadRadarLists,
     openSettingsPanel,
+    onUpdateModel,
+    openModelPanel,
     config.isDemoProject,
     demoState.status,
     toggleDemo
@@ -414,7 +494,7 @@ export function DashboardScreen({
   return (
     <box position='relative' flexDirection='column' height={rows} width={columns} gap={0}>
       {/* Header - slim single line */}
-      <DashboardHeader state={state} config={config} isNarrow={isNarrow} />
+      <DashboardHeader state={state} config={headerConfig} isNarrow={isNarrow} />
 
       {/* Main content: sidebar + detail + context */}
       <box flexDirection='row' flexGrow={1} gap={showListPane && showDetailPane ? 1 : 0}>
@@ -464,6 +544,8 @@ export function DashboardScreen({
                 onAbort={onAbortChat}
                 onRequestFocus={() => setFocusedPane('composer')}
                 onEscape={() => setFocusedPane('detail')}
+                slashCommands={slashCommands}
+                onCommand={handleCommand}
               />
             )}
           </box>
@@ -524,6 +606,10 @@ export function DashboardScreen({
             onUpdateGitSettings?.(git)
           }}
         />
+      )}
+
+      {showModelPanel && onUpdateModel && (
+        <ModelPanel config={headerConfig} onApply={applyModel} onClose={() => setShowModelPanel(false)} />
       )}
     </box>
   ) as ReactElement

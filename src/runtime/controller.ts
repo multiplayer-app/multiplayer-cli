@@ -131,6 +131,11 @@ export class RuntimeController extends EventEmitter {
   private _consecutiveAuthErrors = 0
   // Number of consecutive auth errors on reconnect before treating it as permanent
   private static readonly AUTH_ERROR_RECONNECT_THRESHOLD = 5
+  // User-message ids already dispatched to the local agent. The server may
+  // redeliver the same message:new (e.g. via multiple rooms); without this the
+  // agent would answer the same user message twice.
+  private _handledUserMessageIds = new Set<string>()
+  private static readonly MAX_HANDLED_USER_MESSAGE_IDS = 500
   private readonly _getToken: (() => Promise<string>) | undefined
 
   constructor(config: AgentConfig, logger?: Logger, getToken?: () => Promise<string>) {
@@ -247,6 +252,23 @@ export class RuntimeController extends EventEmitter {
     this.emit('config-updated', this._config)
   }
 
+  updateModel(updates: { model?: string; modelKey?: string; modelUrl?: string }): void {
+    if (updates.model) this._config.model = updates.model
+    this._config.modelKey = updates.modelKey ?? ''
+    this._config.modelUrl = updates.modelUrl
+    if (this._config.dir) {
+      // Persist empty strings (not undefined) so a previously-set key/url is cleared
+      // on disk when switching back to a Claude model.
+      writeProjectSettings(this._config.dir, {
+        model: this._config.model,
+        modelKey: this._config.modelKey ?? '',
+        modelUrl: this._config.modelUrl ?? '',
+      })
+    }
+    this.log('info', `Updated model to ${this._config.model}`)
+    this.emit('config-updated', this._config)
+  }
+
   async listRadarDetections(): Promise<{ components: string[]; environments: string[] }> {
     const cfg = this._config
     const radar = this.radar
@@ -308,6 +330,17 @@ export class RuntimeController extends EventEmitter {
     })
 
     radar.onUserMessage((msg) => {
+      if (msg._id) {
+        if (this._handledUserMessageIds.has(msg._id)) {
+          this.log('debug', `Duplicate user message ${msg._id} ignored`)
+          return
+        }
+        this._handledUserMessageIds.add(msg._id)
+        if (this._handledUserMessageIds.size > RuntimeController.MAX_HANDLED_USER_MESSAGE_IDS) {
+          const oldest = this._handledUserMessageIds.values().next().value
+          if (oldest !== undefined) this._handledUserMessageIds.delete(oldest)
+        }
+      }
       void this.handleUserMessage(msg)
     })
 
@@ -1481,6 +1514,7 @@ export class RuntimeController extends EventEmitter {
         cfg.modelUrl,
         abortController.signal,
         callbacks,
+        cfg.isDemoProject,
       )
 
       if (streamState.streamContent) {
@@ -1948,7 +1982,9 @@ export class RuntimeController extends EventEmitter {
       this.radar?.emitAgentMessage(
         sanitizeMessage(
           {
-            _id: streamState.turnMsgId,
+            // Fresh id generated now (not the turn-start id) so the error sorts
+            // after the user message when messages are ordered by ObjectId.
+            _id: generateMessageId(),
             chat: chatId,
             role: 'error',
             content: `Error: ${message}`,

@@ -247,6 +247,10 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
     controllerRef.current?.updateGitSettings(git)
   }, [])
 
+  const handleUpdateModel = useCallback((updates: Partial<AgentConfig>) => {
+    controllerRef.current?.updateModel(updates)
+  }, [])
+
   const handleLoadRadarLists = useCallback(async () => {
     const controller = controllerRef.current
     if (!controller) return { components: [] as string[], environments: [] as string[] }
@@ -316,6 +320,7 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
             suspendKeyboard={screen === 'quit-confirm'}
             onEmitAgentSettings={handleEmitAgentSettings}
             onUpdateGitSettings={handleUpdateGitSettings}
+            onUpdateModel={handleUpdateModel}
             onLoadRadarLists={handleLoadRadarLists}
           />
         </box>

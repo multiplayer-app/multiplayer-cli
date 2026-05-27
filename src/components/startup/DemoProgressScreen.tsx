@@ -66,7 +66,10 @@ interface ProjectResult {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function normalizeGitUrl(url: string): string {
-  return url.trim().replace(/^(https?|git):\/\//, '').replace(/\.git$/, '')
+  return url
+    .trim()
+    .replace(/^(https?|git):\/\//, '')
+    .replace(/\.git$/, '')
 }
 
 async function gitOriginUrl(dir: string): Promise<string | null> {
@@ -86,10 +89,13 @@ function listOauthAccounts(): string[] {
 
 function PhaseRow({ label, phase }: { label: string; phase: PhaseState }): ReactElement {
   const iconStatus =
-    phase.status === 'done' ? 'success'
-    : phase.status === 'error' ? 'error'
-    : phase.status === 'pending' ? 'idle'
-    : 'loading'
+    phase.status === 'done'
+      ? 'success'
+      : phase.status === 'error'
+        ? 'error'
+        : phase.status === 'pending'
+          ? 'idle'
+          : 'loading'
 
   return (
     <box flexDirection='row' gap={1} alignItems='flex-start'>
@@ -125,7 +131,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
 
   const [clonePhase, setClonePhase] = useState<PhaseState>({
     status: cloneAlreadyDone ? 'done' : 'running',
-    detail: cloneAlreadyDone ? `Ready at ${initialConfig.dir}` : 'Checking…',
+    detail: cloneAlreadyDone ? `Ready at ${initialConfig.dir}` : 'Checking…'
   })
   const [authPhase, setAuthPhase] = useState<PhaseState>({ status: 'pending' })
   const [projectPhase, setProjectPhase] = useState<PhaseState>({ status: 'pending' })
@@ -133,9 +139,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
 
   // ── Phase transition signals ─────────────────────────────────────────────────
 
-  const [clonedDir, setClonedDir] = useState<string | null>(
-    cloneAlreadyDone ? (initialConfig.dir ?? null) : null,
-  )
+  const [clonedDir, setClonedDir] = useState<string | null>(cloneAlreadyDone ? (initialConfig.dir ?? null) : null)
   const [authData, setAuthData] = useState<{
     token: string
     workspaces: SelectableWorkspace[]
@@ -193,9 +197,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
           if (!hasGit) {
             const entries = fs.readdirSync(targetDir)
             if (entries.length > 0) {
-              throw new Error(
-                `${targetDir} exists but is not the Multiplayer demo. Remove or rename it, then retry.`,
-              )
+              throw new Error(`${targetDir} exists but is not the Multiplayer demo. Remove or rename it, then retry.`)
             }
             if (cancelled) return
             setClonePhase({ status: 'running', detail: 'Cloning…' })
@@ -205,12 +207,20 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
             const origin = await gitOriginUrl(targetDir)
             if (!origin || normalizeGitUrl(origin) !== normalizeGitUrl(DEMO_REPO_URL)) {
               throw new Error(
-                `${targetDir} is a git repo but its origin doesn't match the Multiplayer demo. Remove or rename it, then retry.`,
+                `${targetDir} is a git repo but its origin doesn't match the Multiplayer demo. Remove or rename it, then retry.`
               )
             }
             if (cancelled) return
             setClonePhase({ status: 'running', detail: 'Pulling latest…' })
-            await execFileAsync('git', ['-C', targetDir, 'pull', '--ff-only'])
+            const stashResult = await execFileAsync('git', ['-C', targetDir, 'stash', '--include-untracked'])
+            const stashed = !stashResult.stdout.includes('No local changes to save')
+            try {
+              await execFileAsync('git', ['-C', targetDir, 'pull', '--ff-only'])
+            } finally {
+              if (stashed) {
+                await execFileAsync('git', ['-C', targetDir, 'stash', 'pop'])
+              }
+            }
           }
         } else {
           if (cancelled) return
@@ -228,8 +238,10 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
       }
     })()
 
-    return () => { cancelled = true }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // ── Phase 2: Auth — starts when clone signals completion ─────────────────────
@@ -256,7 +268,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
             authorizationServerUrl: data.issuer!,
             authorizationEndpoint: data.authorization_endpoint!,
             tokenEndpoint: data.token_endpoint!,
-            registrationEndpoint: data.registration_endpoint!,
+            registrationEndpoint: data.registration_endpoint!
           })
 
           setAuthPhase({ status: 'waiting', detail: 'Waiting for browser login…' })
@@ -277,8 +289,8 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
             session.workspaces.map(async (ws) => ({
               _id: ws._id,
               name: ws.name,
-              projects: (await api.fetchProjects(ws._id)).filter((p) => !!p._id && !!p.name),
-            })),
+              projects: (await api.fetchProjects(ws._id)).filter((p) => !!p._id && !!p.name)
+            }))
           )
 
           writeCredentials(profile, { authType: 'oauth', ...(session.email ? { email: session.email } : {}) })
@@ -297,9 +309,11 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
         }
       })()
 
-      return () => { cancelled = true }
+      return () => {
+        cancelled = true
+      }
     },
-    [url],
+    [url]
   )
 
   const tryExistingAccount = useCallback(
@@ -323,8 +337,8 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
           session.workspaces.map(async (ws) => ({
             _id: ws._id,
             name: ws.name,
-            projects: (await api.fetchProjects(ws._id)).filter((p) => !!p._id && !!p.name),
-          })),
+            projects: (await api.fetchProjects(ws._id)).filter((p) => !!p._id && !!p.name)
+          }))
         )
 
         let resolvedAccount = accountName
@@ -344,7 +358,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
         runFreshOAuth(dir, profile)
       }
     },
-    [url, runFreshOAuth],
+    [url, runFreshOAuth]
   )
 
   useEffect(() => {
@@ -384,7 +398,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
         authType: 'oauth',
         workspaces,
         accountName,
-        maxConcurrentIssues: initialConfig.maxConcurrentIssues ?? DEFAULT_MAX_CONCURRENT,
+        maxConcurrentIssues: initialConfig.maxConcurrentIssues ?? DEFAULT_MAX_CONCURRENT
       })
       return
     }
@@ -418,7 +432,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
           workspace: ws._id,
           project: proj._id,
           workspaceDisplayName: ws.name,
-          projectDisplayName: proj.name,
+          projectDisplayName: proj.name
         })
       } catch (err: unknown) {
         if (cancelled) return
@@ -426,8 +440,10 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
       }
     })()
 
-    return () => { cancelled = true }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authData])
 
   // ── Phase 4: Model — starts when project signals completion ──────────────────
@@ -439,20 +455,27 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
     setModelPhase({ status: 'running', detail: 'Detecting AI provider…' })
 
     void AiService.checkClaudeRequirements()
-      .then(() => {
-        setModelPhase({ status: 'done', detail: DEFAULT_CLAUDE_MODEL })
+      .then(async () => {
+        // Only pin DEFAULT_CLAUDE_MODEL if the Anthropic API actually lists it.
+        // Otherwise fall back to 'claude-code' so the agent uses Claude Code's own
+        // configured default (Bedrock/Vertex/subscription) — the same thing the
+        // requirements check validated. Forcing an alias the user's provider
+        // doesn't recognize triggers "model identifier is invalid" at chat time.
+        const available = await AiService.fetchAnthropicModels()
+        const model = available.includes(DEFAULT_CLAUDE_MODEL) ? DEFAULT_CLAUDE_MODEL : 'claude-code'
+        setModelPhase({ status: 'done', detail: model })
         onComplete({
           ...projectResult,
           authType: 'oauth',
           maxConcurrentIssues: initialConfig.maxConcurrentIssues ?? DEFAULT_MAX_CONCURRENT,
-          model: DEFAULT_CLAUDE_MODEL,
+          model
         })
       })
       .catch(() => {
         // Claude not available or not logged in — ask for an OpenAI key inline.
         setModelPhase({ status: 'waiting', detail: 'Claude not available — enter OpenAI API key:' })
       })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectResult])
 
   const handleOpenAiKeySubmit = useCallback(
@@ -474,7 +497,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
             authType: 'oauth',
             maxConcurrentIssues: initialConfig.maxConcurrentIssues ?? DEFAULT_MAX_CONCURRENT,
             model: DEFAULT_OPENAI_MODEL,
-            modelKey: key,
+            modelKey: key
           })
         })
         .catch((err: Error) => {
@@ -482,7 +505,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
           setOpenAiKeyError(err.message)
         })
     },
-    [projectResult, initialConfig.maxConcurrentIssues, onComplete],
+    [projectResult, initialConfig.maxConcurrentIssues, onComplete]
   )
 
   // ── Keyboard ─────────────────────────────────────────────────────────────────
@@ -535,7 +558,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
         void tryExistingAccount(chosen, dir, profile)
       }
     },
-    [accountOptions, profileName, runFreshOAuth, tryExistingAccount],
+    [accountOptions, profileName, runFreshOAuth, tryExistingAccount]
   )
 
   const handleCopyUrl = useCallback(() => {
@@ -558,11 +581,19 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
     <box flexDirection='column' gap={1}>
       {/* Clone */}
       <PhaseRow label='Repository' phase={clonePhase} />
-      {clonePhase.error && <text fg='#ef4444' paddingLeft={4}>{clonePhase.error}</text>}
+      {clonePhase.error && (
+        <text fg='#ef4444' paddingLeft={4}>
+          {clonePhase.error}
+        </text>
+      )}
 
       {/* Auth */}
       <PhaseRow label='Account' phase={isPicking ? { ...authPhase, detail: undefined } : authPhase} />
-      {authPhase.error && <text fg='#ef4444' paddingLeft={4}>{authPhase.error}</text>}
+      {authPhase.error && (
+        <text fg='#ef4444' paddingLeft={4}>
+          {authPhase.error}
+        </text>
+      )}
 
       {isPicking && accountOptions && (
         <box flexDirection='column' paddingLeft={4}>
@@ -588,12 +619,16 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
           {oauthFallbackUrl && (
             <box flexDirection='column' gap={1}>
               <text attributes={tuiAttrs({ dim: true })}>If browser didn't open, visit:</text>
-              <text fg='#22d3ee' attributes={tuiAttrs({ underline: true })}>{oauthFallbackUrl}</text>
+              <text fg='#22d3ee' attributes={tuiAttrs({ underline: true })}>
+                {oauthFallbackUrl}
+              </text>
               <box>
                 {urlCopied ? (
                   <text fg='#10b981'>✓ Copied</text>
                 ) : (
-                  <text fg='#22d3ee' onMouseUp={clickHandler(handleCopyUrl)}>Copy URL</text>
+                  <text fg='#22d3ee' onMouseUp={clickHandler(handleCopyUrl)}>
+                    Copy URL
+                  </text>
                 )}
               </box>
               <text attributes={tuiAttrs({ dim: true })}>Or paste the code here:</text>
@@ -610,11 +645,19 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
 
       {/* Project */}
       <PhaseRow label='Project' phase={projectPhase} />
-      {projectPhase.error && <text fg='#ef4444' paddingLeft={4}>{projectPhase.error}</text>}
+      {projectPhase.error && (
+        <text fg='#ef4444' paddingLeft={4}>
+          {projectPhase.error}
+        </text>
+      )}
 
       {/* Model */}
       <PhaseRow label='Model' phase={isWaitingOpenAiKey ? { ...modelPhase, detail: undefined } : modelPhase} />
-      {modelPhase.error && <text fg='#ef4444' paddingLeft={4}>{modelPhase.error}</text>}
+      {modelPhase.error && (
+        <text fg='#ef4444' paddingLeft={4}>
+          {modelPhase.error}
+        </text>
+      )}
 
       {isWaitingOpenAiKey && (
         <box flexDirection='column' gap={1} paddingLeft={4}>

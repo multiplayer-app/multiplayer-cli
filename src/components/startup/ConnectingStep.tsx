@@ -172,9 +172,9 @@ export function ConnectingStep({ config, onComplete, onBack }: Props): ReactElem
         try {
           const isClaudeModel = config.model === 'claude-code' || config.model.startsWith('claude')
           if (isClaudeModel) {
-            await AiService.checkClaudeRequirements()
+            await AiService.checkClaudeRequirements(config.model)
           } else {
-            await AiService.checkOpenAiRequirements(config.modelKey, config.modelUrl)
+            await AiService.checkOpenAiRequirements(config.modelKey, config.modelUrl, config.model)
           }
         } catch (err: unknown) {
           setFailedStep('ai')

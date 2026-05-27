@@ -20,6 +20,11 @@ import {
 /** Chat statuses that indicate the agent is actively working. */
 const ACTIVE_STATUSES = new Set<AgentChatStatus | string>(['processing', 'streaming'])
 
+export interface SlashCommand {
+  command: string
+  description: string
+}
+
 export interface ChatComposerProps {
   /** Current chat session ID, or null when no session is selected. */
   chatId: string | null
@@ -37,6 +42,10 @@ export interface ChatComposerProps {
   onRequestFocus: () => void
   /** Called when the user presses Escape. */
   onEscape: () => void
+  /** Slash commands available in this composer. */
+  slashCommands?: SlashCommand[]
+  /** Called when the user submits a slash command. Return true if handled. */
+  onCommand?: (command: string) => boolean
 }
 
 export function ChatComposer({
@@ -47,11 +56,14 @@ export function ChatComposer({
   onSend,
   onAbort,
   onRequestFocus,
-  onEscape
+  onEscape,
+  slashCommands,
+  onCommand
 }: ChatComposerProps): ReactElement {
   const textareaRef = useRef<TextareaRenderable | null>(null)
   const [hasContent, setHasContent] = useState(false)
   const [sending, setSending] = useState(false)
+  const [inputText, setInputText] = useState('')
 
   const isActive = ACTIVE_STATUSES.has(chatStatus ?? '')
   const canSend = chatId !== null && !isActive && hasContent && !sending
@@ -62,14 +74,25 @@ export function ChatComposer({
     const text = textareaRef.current?.plainText?.trim()
     if (!text) return
 
+    if (text.startsWith('/') && onCommand) {
+      const command = text.slice(1).trim().toLowerCase().split(/\s+/)[0] ?? ''
+      if (onCommand(command)) {
+        textareaRef.current?.clear()
+        setHasContent(false)
+        setInputText('')
+        return
+      }
+    }
+
     setSending(true)
     onSend(chatId, text)
 
     // Clear the textarea
     textareaRef.current?.clear()
     setHasContent(false)
+    setInputText('')
     setSending(false)
-  }, [chatId, canSend, onSend])
+  }, [chatId, canSend, onSend, onCommand])
 
   const handleAbort = useCallback(() => {
     if (!chatId || !canAbort) return
@@ -79,6 +102,7 @@ export function ChatComposer({
   // Track content changes
   const handleContentChange = useCallback(() => {
     const text = textareaRef.current?.plainText ?? ''
+    setInputText(text)
     setHasContent(text.trim().length > 0)
   }, [])
 
@@ -123,6 +147,7 @@ export function ChatComposer({
   useEffect(() => {
     textareaRef.current?.clear()
     setHasContent(false)
+    setInputText('')
     setSending(false)
   }, [chatId])
 
@@ -189,6 +214,26 @@ export function ChatComposer({
     )
   })()
 
+  const trimmedInput = inputText.trimStart()
+  const isTypingSlash = trimmedInput.startsWith('/')
+  const slashQuery = isTypingSlash ? trimmedInput.slice(1).toLowerCase() : ''
+  const allMatchedCommands = isTypingSlash && slashCommands
+    ? slashCommands.filter((c) => c.command.startsWith(slashQuery))
+    : []
+
+  // Fit commands into available width: "Chat │ " prefix (7) + " ↵ Send " suffix (8) + borders (2)
+  const hintsAvailableWidth = width - 17
+  let usedWidth = 0
+  const matchedCommands: typeof allMatchedCommands = []
+  for (const cmd of allMatchedCommands) {
+    const cmdWidth = 1 + cmd.command.length + 1 + cmd.description.length // "/{cmd} {desc}"
+    const gap = matchedCommands.length > 0 ? 1 : 0
+    if (usedWidth + gap + cmdWidth > hintsAvailableWidth) break
+    usedWidth += gap + cmdWidth
+    matchedCommands.push(cmd)
+  }
+  const hiddenCount = allMatchedCommands.length - matchedCommands.length
+
   const borderColor = isFocused ? BRAND_MARK_PRIMARY : BORDER_MUTED
 
   return (
@@ -238,7 +283,21 @@ export function ChatComposer({
             </text>
             <text fg={FG_DIM}>│</text>
             {statusIndicator ??
-              (isFocused ? (
+              (isFocused && matchedCommands.length > 0 ? (
+                <box flexDirection='row' gap={1}>
+                  {matchedCommands.map((c) => (
+                    <box key={c.command} flexDirection='row' gap={0}>
+                      <text fg={BRAND_MARK_PRIMARY} attributes={tuiAttrs({ bold: true })}>
+                        /{c.command}
+                      </text>
+                      <text fg={FG_DIM}> {c.description}</text>
+                    </box>
+                  ))}
+                  {hiddenCount > 0 && (
+                    <text fg={FG_DIM}>+{hiddenCount}</text>
+                  )}
+                </box>
+              ) : isFocused ? (
                 <box flexDirection='row' gap={0}>
                   <text fg={ACCENT} attributes={tuiAttrs({ bold: true })}>
                     ↵

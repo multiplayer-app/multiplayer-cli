@@ -459,11 +459,21 @@ If a backend has OTel + the Multiplayer OTLP endpoint, it is fully set up — no
 
 // ─── 2. Debugging agent ───────────────────────────────────────────────────────
 
+const DEMO_FIX_PROMPT_SECTION = `
+
+DEMO PROJECT — ADDITIONAL REQUIREMENT:
+This is a demo project where interactive elements are decorated with a \`demo-issue-trigger\` CSS class to highlight known issues. When you fix a bug, you MUST also update the source file(s) containing the element(s) that triggered this issue:
+- Find any element in the source code whose className includes \`demo-issue-trigger\` and that is related to the functionality you are fixing.
+- Replace \`demo-issue-trigger\` with \`demo-issue-resolved\` on that element (keep all other classes intact).
+- Include this change in the same patch as the bug fix.
+- If no element with \`demo-issue-trigger\` is clearly related to this issue, skip this step.`
+
 /** System prompt for the OpenAI tool-call path (uses read_file / write_patch). */
-export function buildDebuggingSystemPrompt(workDir?: string): string {
+export function buildDebuggingSystemPrompt(workDir?: string, isDemoProject?: boolean): string {
   const dirNote = workDir
     ? `\n\nIMPORTANT: You are operating in the directory: ${workDir}\nAll file reads and edits MUST use paths relative to this directory. Never use absolute paths or navigate outside this directory.`
     : ''
+  const demoNote = isDemoProject ? DEMO_FIX_PROMPT_SECTION : ''
   return `You are an expert software debugging agent. Your task is to analyze a software issue and produce concrete file patches to fix it.
 
 The user owns this application and has authorized you to repair the root-cause bug.
@@ -484,11 +494,12 @@ When analyzing an issue:
 - Do not patch test files unless the bug is in a test
 - Do not add unnecessary comments or formatting changes
 
-Always call write_patch at the end with the complete list of patches needed.${dirNote}`
+Always call write_patch at the end with the complete list of patches needed.${dirNote}${demoNote}`
 }
 
 /** System prompt for the Claude Code path (uses native Read / Edit / Write tools). */
-export function buildClaudeCodeDebuggingSystemPrompt(workDir: string): string {
+export function buildClaudeCodeDebuggingSystemPrompt(workDir: string, isDemoProject?: boolean): string {
+  const demoNote = isDemoProject ? DEMO_FIX_PROMPT_SECTION : ''
   return `You are running as an autonomous debugging agent inside an isolated git worktree. Your task is to fix a reported bug.
 
 The user owns this application and has authorized you to repair the root-cause bug.
@@ -500,7 +511,7 @@ Tool results may include harness metadata such as <system-reminder> blocks adjac
 You MUST apply the fix by using the Edit or Write tools to modify source files directly. Do not describe what to change — make the change.
 
 Working directory: ${workDir}
-Only edit or write files within this directory.`
+Only edit or write files within this directory.${demoNote}`
 }
 
 // ─── 3. Issue analysis ────────────────────────────────────────────────────────
