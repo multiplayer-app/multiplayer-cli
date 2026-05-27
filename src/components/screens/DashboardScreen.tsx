@@ -10,7 +10,7 @@ import { DashboardHeader } from '../DashboardHeader.js'
 import { SessionListPane } from '../panes/SessionListPane.js'
 import { SessionDetailPane } from '../panes/SessionDetailPane.js'
 import { dashboardSettingsHint } from '../panes/FooterHints.js'
-import { ChatComposer } from '../ChatComposer.js'
+import { ChatComposer, type SlashCommand } from '../ChatComposer.js'
 import { ContextSidebar } from '../ContextSidebar.js'
 import { LogsDock } from '../LogsDock.js'
 import { StatusBar, type StatusBarHint } from '../StatusBar.js'
@@ -238,6 +238,43 @@ export function DashboardScreen({
       return next
     })
   }, [isNarrow, selectedDetail])
+
+  // ── Slash commands ──────────────────────────────────────────────────────────
+
+  const slashCommands = useMemo((): SlashCommand[] => {
+    const cmds: SlashCommand[] = []
+    if (onUpdateModel) cmds.push({ command: 'model', description: 'open model selector' })
+    cmds.push({ command: 'logs', description: showLogs ? 'hide logs' : 'toggle logs' })
+    if (onEmitAgentSettings && onLoadRadarLists) cmds.push({ command: 'settings', description: 'open settings' })
+    cmds.push({ command: 'setup', description: 'restart setup' })
+    cmds.push({ command: 'quit', description: 'quit' })
+    return cmds
+  }, [onUpdateModel, showLogs, onEmitAgentSettings, onLoadRadarLists])
+
+  const handleCommand = useCallback(
+    (command: string): boolean => {
+      switch (command) {
+        case 'model':
+          if (onUpdateModel) { openModelPanel(); return true }
+          return false
+        case 'logs':
+          toggleLogs()
+          return true
+        case 'settings':
+          if (onEmitAgentSettings && onLoadRadarLists) { openSettingsPanel(); return true }
+          return false
+        case 'setup':
+          onRestartSetupRequest()
+          return true
+        case 'quit':
+          onQuitRequest()
+          return true
+        default:
+          return false
+      }
+    },
+    [onUpdateModel, openModelPanel, toggleLogs, onEmitAgentSettings, onLoadRadarLists, openSettingsPanel, onRestartSetupRequest, onQuitRequest]
+  )
 
   // ── Keyboard ────────────────────────────────────────────────────────────────
 
@@ -507,6 +544,8 @@ export function DashboardScreen({
                 onAbort={onAbortChat}
                 onRequestFocus={() => setFocusedPane('composer')}
                 onEscape={() => setFocusedPane('detail')}
+                slashCommands={slashCommands}
+                onCommand={handleCommand}
               />
             )}
           </box>

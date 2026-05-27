@@ -1043,6 +1043,7 @@ const resolveIssueWithOpenAI = async (
   baseUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
+  isDemoProject?: boolean,
 ): Promise<FilePatch[]> => {
   const client = new OpenAI({
     apiKey,
@@ -1050,7 +1051,7 @@ const resolveIssueWithOpenAI = async (
   })
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildDebuggingSystemPrompt() },
+    { role: 'system', content: buildDebuggingSystemPrompt(undefined, isDemoProject) },
     { role: 'user', content: prompt },
   ]
 
@@ -1089,6 +1090,7 @@ const resolveIssueWithClaudeCode = async (
   model: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
+  isDemoProject?: boolean,
 ): Promise<FilePatch[]> => {
   const absProjectDir = path.resolve(projectDir)
   const git = simpleGit(absProjectDir)
@@ -1123,7 +1125,7 @@ const resolveIssueWithClaudeCode = async (
       systemPrompt: {
         type: 'preset',
         preset: 'claude_code',
-        append: buildClaudeCodeDebuggingSystemPrompt(absProjectDir),
+        append: buildClaudeCodeDebuggingSystemPrompt(absProjectDir, isDemoProject),
       },
       maxTurns: 1000,
       includePartialMessages: !!(callbacks.onProgress || callbacks.onToolCall),
@@ -1285,11 +1287,12 @@ export const resolveIssue = async (
   modelUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
+  isDemoProject?: boolean,
 ): Promise<FilePatch[]> => {
   if (model === 'claude-code' || isAnthropicModel(model)) {
     // Claude Code SDK handles tool execution internally — confirmation dialogs are not supported
     const claudeModel = model === 'claude-code' ? undefined : model
-    return resolveIssueWithClaudeCode(issue, projectDir, prompt, claudeModel, abortSignal, callbacks)
+    return resolveIssueWithClaudeCode(issue, projectDir, prompt, claudeModel, abortSignal, callbacks, isDemoProject)
   }
 
   const patches = await resolveIssueWithOpenAI(
@@ -1301,6 +1304,7 @@ export const resolveIssue = async (
     modelUrl,
     abortSignal,
     callbacks,
+    isDemoProject,
   )
 
   if (patches.length > 0) {

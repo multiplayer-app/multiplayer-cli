@@ -1460,6 +1460,7 @@ export class RuntimeController extends EventEmitter {
         cfg.modelUrl,
         abortController.signal,
         callbacks,
+        cfg.isDemoProject,
       )
 
       if (streamState.streamContent) {
