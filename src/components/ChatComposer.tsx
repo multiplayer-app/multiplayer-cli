@@ -217,9 +217,22 @@ export function ChatComposer({
   const trimmedInput = inputText.trimStart()
   const isTypingSlash = trimmedInput.startsWith('/')
   const slashQuery = isTypingSlash ? trimmedInput.slice(1).toLowerCase() : ''
-  const matchedCommands = isTypingSlash && slashCommands
+  const allMatchedCommands = isTypingSlash && slashCommands
     ? slashCommands.filter((c) => c.command.startsWith(slashQuery))
     : []
+
+  // Fit commands into available width: "Chat │ " prefix (7) + " ↵ Send " suffix (8) + borders (2)
+  const hintsAvailableWidth = width - 17
+  let usedWidth = 0
+  const matchedCommands: typeof allMatchedCommands = []
+  for (const cmd of allMatchedCommands) {
+    const cmdWidth = 1 + cmd.command.length + 1 + cmd.description.length // "/{cmd} {desc}"
+    const gap = matchedCommands.length > 0 ? 1 : 0
+    if (usedWidth + gap + cmdWidth > hintsAvailableWidth) break
+    usedWidth += gap + cmdWidth
+    matchedCommands.push(cmd)
+  }
+  const hiddenCount = allMatchedCommands.length - matchedCommands.length
 
   const borderColor = isFocused ? BRAND_MARK_PRIMARY : BORDER_MUTED
 
@@ -280,6 +293,9 @@ export function ChatComposer({
                       <text fg={FG_DIM}> {c.description}</text>
                     </box>
                   ))}
+                  {hiddenCount > 0 && (
+                    <text fg={FG_DIM}>+{hiddenCount}</text>
+                  )}
                 </box>
               ) : isFocused ? (
                 <box flexDirection='row' gap={0}>
