@@ -280,10 +280,7 @@ export const generateChatTitle = async (
       const claudeModel = model === 'claude-code' ? undefined : model
       return (await runClaudeCodePrompt(prompt, claudeModel)).trim() || issue.title
     } else {
-      const client = new OpenAI({
-        apiKey: modelKey,
-        ...(modelUrl ? { baseURL: modelUrl } : {}),
-      })
+      const client = buildOpenAiClient(modelKey, model, modelUrl)
       const response = await client.chat.completions.create({
         model,
         max_tokens: 64,
@@ -297,6 +294,37 @@ export const generateChatTitle = async (
 }
 
 const isAnthropicModel = (model: string): boolean => model.startsWith('claude') && model !== 'claude-code'
+
+export const isGeminiModel = (model: string): boolean => model.startsWith('gemini')
+export const isCodexModel = (model: string): boolean => model.startsWith('codex')
+
+/**
+ * Returns the default base URL for providers that require a non-standard endpoint.
+ * Gemini models use Google's OpenAI-compatible gateway.
+ * OpenRouter is detected at runtime via the stored modelUrl.
+ */
+export const getProviderDefaultBaseUrl = (model: string): string | undefined => {
+  if (isGeminiModel(model)) return 'https://generativelanguage.googleapis.com/v1beta/openai/'
+  return undefined
+}
+
+/**
+ * Builds an OpenAI-SDK client with provider-appropriate config:
+ *  - Auto-applies Gemini base URL when the model name starts with "gemini"
+ *  - Injects OpenRouter attribution headers when the base URL points to openrouter.ai
+ */
+const buildOpenAiClient = (apiKey: string, model: string, baseUrl?: string): OpenAI => {
+  const effectiveBaseUrl = baseUrl ?? getProviderDefaultBaseUrl(model)
+  const isOpenRouter = effectiveBaseUrl?.includes('openrouter.ai') ?? false
+  const openRouterHeaders = isOpenRouter
+    ? { 'HTTP-Referer': 'https://multiplayer.app', 'X-Title': 'Multiplayer' }
+    : undefined
+  return new OpenAI({
+    apiKey,
+    ...(effectiveBaseUrl ? { baseURL: effectiveBaseUrl } : {}),
+    ...(openRouterHeaders ? { defaultHeaders: openRouterHeaders } : {}),
+  })
+}
 
 const findSpanById = (traces: unknown[], targetSpanId: string): any => {
   for (const item of traces as any[]) {
@@ -662,10 +690,7 @@ export const analyseIssueContext = async (
       return JSON.parse(text) as IssueAnalysis
     }
 
-    const openai = new OpenAI({
-      apiKey: modelKey,
-      ...(modelUrl ? { baseURL: modelUrl } : {}),
-    })
+    const openai = buildOpenAiClient(modelKey, model, modelUrl)
     const response = await openai.chat.completions.create({
       model,
       max_tokens: 100,
@@ -1238,10 +1263,7 @@ const resolveIssueWithOpenAI = async (
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
 ): Promise<FilePatch[]> => {
-  const client = new OpenAI({
-    apiKey,
-    ...(baseUrl ? { baseURL: baseUrl } : {}),
-  })
+  const client = buildOpenAiClient(apiKey, model, baseUrl)
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: 'system', content: buildDebuggingSystemPrompt() },
@@ -1386,10 +1408,7 @@ const continueChatWithOpenAI = async (
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
 ): Promise<string> => {
-  const client = new OpenAI({
-    apiKey,
-    ...(baseUrl ? { baseURL: baseUrl } : {}),
-  })
+  const client = buildOpenAiClient(apiKey, model, baseUrl)
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: 'system', content: buildDebuggingSystemPrompt() },
@@ -1547,7 +1566,7 @@ export const resolveIssue = async (
     prompt,
     model,
     modelKey,
-    modelUrl,
+    modelUrl ?? getProviderDefaultBaseUrl(model),
     abortSignal,
     callbacks,
   )
@@ -1582,10 +1601,7 @@ export const generatePrContent = async (
       const claudeModel = model === 'claude-code' ? undefined : model
       text = await runClaudeCodePrompt(`${systemPrompt}\n\n${userMessage}`, claudeModel)
     } else {
-      const openai = new OpenAI({
-        apiKey: modelKey,
-        ...(modelUrl ? { baseURL: modelUrl } : {}),
-      })
+      const openai = buildOpenAiClient(modelKey ?? '', model, modelUrl)
       const response = await openai.chat.completions.create({
         model,
         max_tokens: 1024,
@@ -1630,5 +1646,5 @@ export const continueChat = async (
     const claudeModel = model === 'claude-code' ? undefined : model
     return continueChatWithClaudeCode(history, projectDir, claudeModel, abortSignal, callbacks)
   }
-  return continueChatWithOpenAI(history, projectDir, model, modelKey, modelUrl, abortSignal, callbacks)
+  return continueChatWithOpenAI(history, projectDir, model, modelKey, modelUrl ?? getProviderDefaultBaseUrl(model), abortSignal, callbacks)
 }
