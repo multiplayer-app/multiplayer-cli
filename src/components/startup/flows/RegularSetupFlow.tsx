@@ -149,7 +149,7 @@ function firstRequiredStep(config: Partial<AgentConfig>): StepId {
   return 'connecting'
 }
 
-const SELF_NAVIGATING_STEPS: Set<StepId> = new Set(['project-select'])
+const SELF_NAVIGATING_STEPS: Set<StepId> = new Set(['project-select', 'model'])
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -385,7 +385,7 @@ export function RegularSetupFlow({
       )}
       {step === 'workspace' && <WorkspaceStep config={config} onComplete={advance} />}
       {step === 'directory' && <DirectoryStep config={config} onComplete={advance} />}
-      {step === 'model' && <ModelStep config={config} onComplete={advance} />}
+      {step === 'model' && <ModelStep config={config} onComplete={advance} onBack={goBack} />}
       {step === 'rate-limits' && <RateLimitsStep config={config} onComplete={advance} />}
       {step === 'session-recorder' && (
         <MultiplayerSdkStep config={config} onComplete={advance} onBack={goBack} />

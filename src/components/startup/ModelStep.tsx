@@ -30,7 +30,7 @@ const CLAUDE_MODELS: ModelOption[] = [
     label: 'claude-code',
     value: 'claude-code',
     provider: 'claude',
-    description: "Claude Code's default (recommended)"
+    description: 'Claude Code\'s default (recommended)',
   },
   { label: 'claude-opus-4-7', value: 'claude-opus-4-7', provider: 'claude', description: 'Most powerful' },
   { label: 'claude-sonnet-4-6', value: 'claude-sonnet-4-6', provider: 'claude', description: 'Fast, capable' },
@@ -96,11 +96,13 @@ const API_KEY_PLACEHOLDER: Record<Provider, string> = {
 interface Props {
   config: Partial<AgentConfig>
   onComplete: (updates: Partial<AgentConfig>) => void
+  /** Called when the user presses ESC on the top-level model selection screen. */
+  onBack?: () => void
 }
 
 type SubStep = 'detecting' | 'select' | 'api-key' | 'custom-model' | 'api-url'
 
-export function ModelStep({ config, onComplete }: Props): ReactElement | null {
+export function ModelStep({ config, onComplete, onBack }: Props): ReactElement | null {
   const [subStep, setSubStep] = useState<SubStep>('detecting')
   const [claudeAvailable, setClaudeAvailable] = useState(false)
   const [detectError, setDetectError] = useState<string | null>(null)
@@ -223,10 +225,20 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
       } else if (name === 'return') {
         const opt = options[selectedIndex]
         if (opt) selectModel(opt)
+      } else if (name === 'escape') {
+        // ESC on the model list: exit the step entirely (go to previous wizard step)
+        key.stopPropagation()
+        onBack?.()
       } else if ((name === 'r' || name === 'R') && loginError) {
         runDetection()
         key.stopPropagation()
       }
+    } else if (name === 'escape') {
+      // ESC on any inner sub-step: go back to the model list
+      setSubStep('select')
+      setApiKeyError(null)
+      setCustomModelError(null)
+      key.stopPropagation()
     }
   })
 
@@ -390,7 +402,7 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
             width={50}
           />
         )}
-        <FooterHints hints='Enter confirm' />
+        <FooterHints hints='Enter confirm · Esc back' />
       </box>
     ) as ReactElement
   }
@@ -412,7 +424,7 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
           placeholder={isOpenRouter ? 'anthropic/claude-3-5-sonnet' : 'gpt-4.1-mini or provider-specific id'}
           width={55}
         />
-        <FooterHints hints='Enter continue' />
+        <FooterHints hints='Enter continue · Esc back' />
       </box>
     ) as ReactElement
   }
@@ -436,7 +448,7 @@ export function ModelStep({ config, onComplete }: Props): ReactElement | null {
           placeholder='leave empty for default'
           width={50}
         />
-        <FooterHints hints='Enter continue' />
+        <FooterHints hints='Enter continue · Esc back' />
       </box>
     ) as ReactElement
   }
