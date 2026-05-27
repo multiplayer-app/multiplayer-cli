@@ -25,6 +25,7 @@ const FIELDS: Field[] = [
 const isClaudeModel = (model?: string): boolean => !!(model?.startsWith('claude'))
 
 const MODEL_OPTIONS = [
+  { label: 'claude-code', value: 'claude-code' },
   { label: 'claude-opus-4-7', value: 'claude-opus-4-7' },
   { label: 'claude-sonnet-4-6', value: 'claude-sonnet-4-6' },
   { label: 'claude-opus-4-6', value: 'claude-opus-4-6' },

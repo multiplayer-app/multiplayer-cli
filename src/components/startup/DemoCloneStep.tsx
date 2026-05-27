@@ -92,7 +92,15 @@ export function DemoCloneStep({ config, onComplete, onBack }: Props): ReactEleme
             }
             if (cancelled) return
             setStatus('pulling')
-            await execFileAsync('git', ['-C', targetDir, 'pull', '--ff-only'])
+            const stashResult = await execFileAsync('git', ['-C', targetDir, 'stash', '--include-untracked'])
+            const stashed = !stashResult.stdout.includes('No local changes to save')
+            try {
+              await execFileAsync('git', ['-C', targetDir, 'pull', '--ff-only'])
+            } finally {
+              if (stashed) {
+                await execFileAsync('git', ['-C', targetDir, 'stash', 'pop'])
+              }
+            }
           }
         } else {
           if (cancelled) return
