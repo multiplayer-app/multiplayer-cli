@@ -24,7 +24,7 @@ const CLAUDE_MODELS: ModelOption[] = [
     provider: 'claude',
     description: "Claude Code's default (recommended)"
   },
-  { label: 'claude-opus-4-9', value: 'claude-opus-4-9', provider: 'claude', description: 'Most powerful' },
+  { label: 'claude-opus-4-7', value: 'claude-opus-4-7', provider: 'claude', description: 'Most powerful' },
   { label: 'claude-sonnet-4-6', value: 'claude-sonnet-4-6', provider: 'claude', description: 'Fast, capable' },
   { label: 'claude-opus-4-6', value: 'claude-opus-4-6', provider: 'claude', description: 'Fast, powerful' },
   { label: 'claude-haiku-4-5', value: 'claude-haiku-4-5-20251001', provider: 'claude', description: 'Fastest' }
