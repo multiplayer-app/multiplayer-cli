@@ -1925,19 +1925,68 @@ export class RuntimeController extends EventEmitter {
     const cfg = this._config
     const dirs = this.getDirs(chatId)
 
-    // Fetch any user-uploaded attachments and embed them in the history entry
-    // so the LLM sees their content (text files inline, images as base64).
+    // Fetch user-uploaded file attachments and embed their content in the message.
+    // Only 'file' type attachments carry presigned S3 download URLs; other types
+    // (context, link, artifact) are handled separately below or have no fetchable body.
     let messageContent = content
     let messageImages: string[] | undefined
-    if (msg.attachments?.length) {
+    const fileAttachments = (msg.attachments ?? []).filter((a) => a.type === 'file')
+    if (fileAttachments.length) {
       const { textBlocks, images } = await AiService.fetchAttachmentContent(
-        msg.attachments.map((a) => ({ name: a.name, url: a.url, mimeType: a.mimeType })),
+        fileAttachments.map((a) => ({ name: a.name, url: a.url, mimeType: a.mimeType })),
       )
       if (textBlocks.length) {
         messageContent = `${content}\n\n${textBlocks.join('\n\n')}`
       }
       if (images.length) {
         messageImages = images
+      }
+    }
+
+    // Handle 'context' attachments of kind 'debugSession'.
+    // For Claude models: register an in-process MCP tool so the LLM can fetch
+    //   observability data on demand (lazy, avoids bloating every turn).
+    // For all other providers: MCP is Claude-only, so pre-fetch and inject as text.
+    const debugSessionIds = (msg.attachments ?? [])
+      .filter((a) => a.type === 'context' && (a.metadata?.kind as string | undefined) === 'debugSession')
+      .map((a) => (a.metadata?.data as Record<string, unknown> | undefined)?.debugSessionId as string | undefined)
+      .filter((id): id is string => !!id)
+
+    let mcpServers: Record<string, import('@anthropic-ai/claude-agent-sdk').McpServerConfig> | undefined
+    if (debugSessionIds.length > 0 && cfg.workspace && cfg.project) {
+      const mcpConfig = { apiKey: cfg.apiKey, apiUrl: cfg.url, authType: cfg.authType }
+      const isClaudeProvider = cfg.model === 'claude-code' || cfg.model.startsWith('claude')
+
+      if (isClaudeProvider) {
+        // MCP approach: the LLM calls get_debug_session_context when it needs the data
+        mcpServers = {
+          'multiplayer-debug-sessions': AiService.buildDebugSessionMcpServer(mcpConfig, cfg.workspace, cfg.project),
+        }
+        const idList = debugSessionIds.map((id) => `\`${id}\``).join(', ')
+        messageContent = `${messageContent}\n\n> Debug session${debugSessionIds.length > 1 ? 's' : ''} attached: ${idList}. Use the \`get_debug_session_context\` tool to fetch traces, logs, and notes for ${debugSessionIds.length > 1 ? 'each session' : 'this session'}.`
+        this.log('info', `Debug session MCP server registered for session(s): ${debugSessionIds.join(', ')}`)
+      } else {
+        // Pre-fetch approach: inject context directly into the message text
+        for (const debugSessionId of debugSessionIds) {
+          this.log('info', `Pre-fetching debug session context for non-Claude model: ${debugSessionId}`)
+          try {
+            const result = await AiService.fetchDebugSessionContext(debugSessionId, cfg.workspace, cfg.project, mcpConfig)
+            if (!result) {
+              this.log('info', `No debug context returned for session ${debugSessionId}`)
+              continue
+            }
+            const markdown = AiService.buildAttachedSessionContextDoc(debugSessionId, result.context)
+            messageContent = `${messageContent}\n\n${markdown}`
+            if (result.sessionSketches.length > 0) {
+              const sketchList = result.sessionSketches
+                .map((s) => `- ${s.title ?? 'Sketch'} (s3://${s.s3Bucket}/${s.s3Key})`)
+                .join('\n')
+              messageContent = `${messageContent}\n\n**Session Sketches:**\n${sketchList}`
+            }
+          } catch (err) {
+            this.log('error', `Failed to pre-fetch debug session context for ${debugSessionId}: ${getErrorMessage(err)}`)
+          }
+        }
       }
     }
 
@@ -1965,6 +2014,7 @@ export class RuntimeController extends EventEmitter {
         cfg.modelUrl,
         abortController.signal,
         callbacks,
+        mcpServers,
       )
       const final = normalizeStreamContent(streamState.streamContent || response)
       if (final) context.history.push({ role: 'assistant', content: final })

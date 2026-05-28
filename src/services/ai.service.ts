@@ -1,7 +1,10 @@
 import OpenAI from 'openai'
 import Anthropic from '@anthropic-ai/sdk'
-import { query } from '@anthropic-ai/claude-agent-sdk'
+import { query, createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
+import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import cliPath from '@anthropic-ai/claude-agent-sdk/embed'
+import { z } from 'zod'
 import { simpleGit } from 'simple-git'
 import fs from 'fs'
 import path from 'path'
@@ -683,9 +686,12 @@ export const buildAttachedSessionContextDoc = (
 const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'])
 
 /**
- * Fetches the content of user-uploaded attachments so the LLM can see them.
- * - Text/code files: returned as labelled text blocks appended to message content.
+ * Fetches the content of user-uploaded file attachments so the LLM can see them.
  * - Images: returned as base64 data URLs for vision-capable models.
+ * - Text/code files: returned as labelled text blocks appended to message content.
+ *
+ * `mimeType` on the attachment is used first; the response `Content-Type` header is
+ * consulted as a fallback when `mimeType` is absent so images are never mis-classified.
  * Silently skips attachments that fail to fetch.
  */
 export const fetchAttachmentContent = async (
@@ -706,10 +712,17 @@ export const fetchAttachmentContent = async (
           return
         }
 
-        if (mimeType && IMAGE_MIME_TYPES.has(mimeType)) {
+        // Prefer the declared mimeType; fall back to Content-Type so images with a
+        // missing or generic mimeType (e.g. "application/octet-stream") are still
+        // treated as images when the server sends the correct Content-Type.
+        const contentTypeHeader = res.headers.get('content-type') ?? ''
+        const effectiveMimeType = mimeType || contentTypeHeader.split(';')[0]!.trim()
+
+        if (effectiveMimeType && IMAGE_MIME_TYPES.has(effectiveMimeType)) {
           const buf = await res.arrayBuffer()
           const b64 = Buffer.from(buf).toString('base64')
-          images.push(`data:${mimeType};base64,${b64}`)
+          // Use the effective mimeType so the data URL is always valid
+          images.push(`data:${effectiveMimeType};base64,${b64}`)
         } else {
           // Treat everything else as text (code, logs, plain text, etc.)
           const text = await res.text()
@@ -987,6 +1000,55 @@ export const buildIssueContextDoc = (
 }
 
 export { buildIssuePromptFallback }
+
+/**
+ * Builds an in-process MCP server that exposes a `get_debug_session_context` tool.
+ * The LLM can call this tool when it needs the full traces/logs/rrweb/notes for a
+ * debug session that was referenced in a context attachment.
+ */
+export const buildDebugSessionMcpServer = (
+  mcpConfig: McpConfig,
+  workspaceId: string,
+  projectId: string,
+): McpServerConfig => {
+  const getDebugSessionContextTool = tool(
+    'get_debug_session_context',
+    'Fetch the full debug context (traces, logs, rrweb timeline, and session notes) for a Multiplayer debug session. Use this when a debug session was attached to the conversation and you need its observability data.',
+    {
+      debugSessionId: z.string().describe('The ID of the debug session to fetch context for'),
+    },
+    async ({ debugSessionId }): Promise<CallToolResult> => {
+      try {
+        const result = await fetchDebugSessionContext(debugSessionId, workspaceId, projectId, mcpConfig)
+        if (!result) {
+          return {
+            content: [{ type: 'text', text: `No debug context found for session ${debugSessionId}` }],
+            isError: true,
+          }
+        }
+        const markdown = buildAttachedSessionContextDoc(debugSessionId, result.context)
+        const sketchNote =
+          result.sessionSketches.length > 0
+            ? `\n\n*${result.sessionSketches.length} sketch image(s) are stored in S3 — see the chat attachments for visual content.*`
+            : ''
+        return {
+          content: [{ type: 'text', text: `${markdown}${sketchNote}` }],
+        }
+      } catch (err) {
+        return {
+          content: [{ type: 'text', text: `Error fetching debug context: ${err instanceof Error ? err.message : String(err)}` }],
+          isError: true,
+        }
+      }
+    },
+  )
+
+  return createSdkMcpServer({
+    name: 'multiplayer-debug-sessions',
+    version: '1.0.0',
+    tools: [getDebugSessionContextTool],
+  })
+}
 
 const readFileSafe = (projectDir: string, filePath: string): string => {
   try {
@@ -1473,12 +1535,15 @@ const continueChatWithOpenAI = async (
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: 'system', content: buildDebuggingSystemPrompt() },
     ...history.map((m): OpenAI.Chat.ChatCompletionMessageParam => {
-      if (m.images?.length) {
-        // Vision: multipart content with text + image URLs (user role only)
+      if (m.role === 'user' && m.images?.length) {
+        // Vision: multipart content with text + image URLs.
+        // Omit the text block when content is empty — some providers reject blank
+        // text content blocks and require at least one non-empty block.
+        const textBlock = m.content ? [{ type: 'text' as const, text: m.content }] : []
         return {
           role: 'user',
           content: [
-            { type: 'text' as const, text: m.content },
+            ...textBlock,
             ...m.images.map((dataUrl) => ({
               type: 'image_url' as const,
               image_url: { url: dataUrl },
@@ -1500,6 +1565,7 @@ const continueChatWithClaudeCode = async (
   model: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
+  mcpServers?: Record<string, McpServerConfig>,
 ): Promise<string> => {
   if (!history.length) {
     throw new Error('EMPTY_HISTORY')
@@ -1575,6 +1641,7 @@ const continueChatWithClaudeCode = async (
       maxTurns: 250,
       includePartialMessages: !!(callbacks.onProgress || callbacks.onToolCall || callbacks.onToolCallResult),
       ...(model ? { model } : {}),
+      ...(mcpServers ? { mcpServers } : {}),
       stderr: (data: string) => {
         const line = data.trim()
         if (line) callbacks.onProgress?.(`[claude stderr] ${line}`)
@@ -1703,10 +1770,11 @@ export const continueChat = async (
   modelUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
+  mcpServers?: Record<string, McpServerConfig>,
 ): Promise<string> => {
   if (model === 'claude-code' || isAnthropicModel(model)) {
     const claudeModel = model === 'claude-code' ? undefined : model
-    return continueChatWithClaudeCode(history, projectDir, claudeModel, abortSignal, callbacks)
+    return continueChatWithClaudeCode(history, projectDir, claudeModel, abortSignal, callbacks, mcpServers)
   }
   return continueChatWithOpenAI(history, projectDir, model, modelKey, modelUrl ?? getProviderDefaultBaseUrl(model), abortSignal, callbacks)
 }
