@@ -5,31 +5,36 @@ import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import cliPath from '@anthropic-ai/claude-agent-sdk/embed'
 import { z } from 'zod'
-import { simpleGit } from 'simple-git'
-import fs from 'fs'
-import path from 'path'
 import { exec, spawn } from 'child_process'
 import { promisify } from 'util'
-import { Issue, FilePatch, Release, ConversationMessage } from '../types/index.js'
-import { MAX_FILE_SIZE, MAX_FILES_TO_READ } from '../config.js'
+import { Issue, Release, ConversationMessage } from '../types/index.js'
 import { logger } from '../logger.js'
 import { logToTui } from '../lib/tuiSink.js'
 import { getAuthHeaders } from '../lib/authHeaders.js'
 import {
   escapePromptMarkup,
   sanitizeCapturedValue,
-  wrapUntrustedObservabilityData
+  wrapUntrustedObservabilityData,
 } from '../lib/untrustedObservability.js'
 import {
   buildChatTitlePrompt,
-  buildDebuggingSystemPrompt,
   ANALYSE_ISSUE_SYSTEM_PROMPT,
   buildAnalyseIssueUserMessage,
   PR_GENERATION_SYSTEM_PROMPT,
   buildPrUserMessage,
   buildIssuePromptFallback,
-  buildClaudeCodeDebuggingSystemPrompt
+  buildClaudeCodeDebuggingSystemPrompt,
 } from '../prompts.js'
+import { createProvider, isAnthropicModel } from '../lib/llm/index.js'
+import type { AgentStreamEvent, FilePatch } from '../lib/llm/index.js'
+
+// Re-export classification helpers so callers don't need to import from two places.
+export {
+  isAnthropicModel,
+  isGeminiModel,
+  isCodexModel,
+  getProviderDefaultBaseUrl,
+} from '../lib/llm/index.js'
 
 const execAsync = promisify(exec)
 
@@ -109,7 +114,7 @@ export const checkClaudeRequirements = async (model?: string): Promise<void> => 
     claudeAuthLog('[claude-auth] ANTHROPIC_API_KEY is set — skipping interactive login probe')
   } else {
     const loginError = new Error(
-      'Claude Code is not authenticated.\n' + 'Open a new terminal, run "claude" and complete login, then press Retry.'
+      'Claude Code is not authenticated.\n' + 'Open a new terminal, run "claude" and complete login, then press Retry.',
     )
     await probeClaudeLoginViaCli(loginError)
   }
@@ -139,8 +144,8 @@ export const verifyClaudeModel = async (model?: string): Promise<void> => {
         permissionMode: 'bypassPermissions',
         settingSources: [],
         maxTurns: 1,
-        model
-      }
+        model,
+      },
     })) {
       const msg = message as any
       if (msg.type === 'result' && msg.subtype !== 'success') {
@@ -157,7 +162,7 @@ export const verifyClaudeModel = async (model?: string): Promise<void> => {
     claudeAuthLog(`[claude-auth] model ${model} verification failed: ${modelError}`)
     throw new Error(
       `Selected model "${model}" is unavailable or failed verification:\n${modelError}\n\n` +
-        'Pick a different model with --model.'
+      'Pick a different model with --model.',
     )
   }
   claudeAuthLog(`[claude-auth] model ${model} verified`)
@@ -192,7 +197,7 @@ export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string, 
   }
   const client = new OpenAI({
     apiKey,
-    ...(baseUrl ? { baseURL: baseUrl } : {})
+    ...(baseUrl ? { baseURL: baseUrl } : {}),
   })
   let modelIds: string[]
   try {
@@ -211,8 +216,26 @@ export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string, 
   // OpenAI-compatible endpoints return nothing, and we shouldn't false-fail there.
   if (model && modelIds.length > 0 && !modelIds.includes(model)) {
     throw new Error(
-      `Selected model "${model}" is not available from this provider. Pick a different model with --model.`
+      `Selected model "${model}" is not available from this provider. Pick a different model with --model.`,
     )
+  }
+}
+
+/**
+ * Lists models from any OpenAI-compatible endpoint.
+ * Never throws — returns an empty array when the provider doesn't support the
+ * /models endpoint or when the request fails for any reason.
+ */
+export const fetchOpenAiCompatibleModels = async (apiKey: string, baseUrl?: string): Promise<string[]> => {
+  try {
+    const client = new OpenAI({
+      apiKey,
+      ...(baseUrl ? { baseURL: baseUrl } : {}),
+    })
+    const page = await client.models.list()
+    return page.data.map((m) => m.id)
+  } catch {
+    return []
   }
 }
 
@@ -326,66 +349,19 @@ export interface StreamCallbacks {
   confirmToolCall?: ConfirmToolCallFn
 }
 
-// Tools that must pause and wait for user confirmation before execution
-const CONFIRM_REQUIRED_TOOLS = new Set(['write_patch'])
-
 export const generateChatTitle = async (
   issue: Issue,
   model: string,
   modelKey: string,
-  modelUrl?: string
+  modelUrl?: string,
 ): Promise<string> => {
-  const prompt = buildChatTitlePrompt(issue)
-
   try {
-    if (model === 'claude-code' || isAnthropicModel(model)) {
-      const claudeModel = model === 'claude-code' ? undefined : model
-      return (await runClaudeCodePrompt(prompt, claudeModel)).trim() || issue.title
-    } else {
-      const client = buildOpenAiClient(modelKey, model, modelUrl)
-      const response = await client.chat.completions.create({
-        model,
-        max_tokens: 64,
-        messages: [{ role: 'user', content: prompt }]
-      })
-      return response.choices[0]?.message?.content?.trim() ?? issue.title
-    }
+    const provider = createProvider({ model, apiKey: modelKey, baseUrl: modelUrl })
+    const { text } = await provider.complete({ userMessage: buildChatTitlePrompt(issue), maxTokens: 64 })
+    return text.trim() || issue.title
   } catch {
     return `[${issue.service.serviceName}] ${issue.title}`
   }
-}
-
-const isAnthropicModel = (model: string): boolean => model.startsWith('claude') && model !== 'claude-code'
-
-export const isGeminiModel = (model: string): boolean => model.startsWith('gemini')
-export const isCodexModel = (model: string): boolean => model.startsWith('codex')
-
-/**
- * Returns the default base URL for providers that require a non-standard endpoint.
- * Gemini models use Google's OpenAI-compatible gateway.
- * OpenRouter is detected at runtime via the stored modelUrl.
- */
-export const getProviderDefaultBaseUrl = (model: string): string | undefined => {
-  if (isGeminiModel(model)) return 'https://generativelanguage.googleapis.com/v1beta/openai/'
-  return undefined
-}
-
-/**
- * Builds an OpenAI-SDK client with provider-appropriate config:
- *  - Auto-applies Gemini base URL when the model name starts with "gemini"
- *  - Injects OpenRouter attribution headers when the base URL points to openrouter.ai
- */
-const buildOpenAiClient = (apiKey: string, model: string, baseUrl?: string): OpenAI => {
-  const effectiveBaseUrl = baseUrl ?? getProviderDefaultBaseUrl(model)
-  const isOpenRouter = effectiveBaseUrl?.includes('openrouter.ai') ?? false
-  const openRouterHeaders = isOpenRouter
-    ? { 'HTTP-Referer': 'https://multiplayer.app', 'X-Title': 'Multiplayer' }
-    : undefined
-  return new OpenAI({
-    apiKey,
-    ...(effectiveBaseUrl ? { baseURL: effectiveBaseUrl } : {}),
-    ...(openRouterHeaders ? { defaultHeaders: openRouterHeaders } : {})
-  })
 }
 
 const findSpanById = (traces: unknown[], targetSpanId: string): any => {
@@ -441,19 +417,19 @@ const buildRrwebTimeline = (events: any[]): string => {
 
 export const fetchIssueDebugContext = async (
   issue: Issue,
-  mcpConfig: McpConfig
+  mcpConfig: McpConfig,
 ): Promise<{ context: string; debugSessionId: string } | undefined> => {
   try {
     const listUrl = new URL(
       `/v0/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions`,
-      mcpConfig.apiUrl
+      mcpConfig.apiUrl,
     )
     listUrl.searchParams.set('issueComponentHash', issue.componentHash)
     listUrl.searchParams.set('limit', '1')
     listUrl.searchParams.set('sortKey', 'createdAt')
     listUrl.searchParams.set('sortDirection', '-1')
     const listRes = await fetch(listUrl.toString(), {
-      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType)
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
     })
     if (!listRes.ok) return undefined
     const listData = (await listRes.json()) as any
@@ -462,7 +438,7 @@ export const fetchIssueDebugContext = async (
 
     // Find the span ID for this specific issue in the session
     const sessionIssue = (debugSession.issues as any[] | undefined)?.find(
-      (i: any) => i.issueComponentHash === issue.componentHash
+      (i: any) => i.issueComponentHash === issue.componentHash,
     )
     const targetSpanId = sessionIssue?.spanId as string | undefined
 
@@ -474,30 +450,30 @@ export const fetchIssueDebugContext = async (
       const logsFile = (debugSession.s3Files as any[]).find((f: any) => f.dataType === 'OTLP_LOGS')
       const [tracesData, logsData] = await Promise.all([
         tracesFile?.url ? fetch(tracesFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
-        logsFile?.url ? fetch(logsFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([])
+        logsFile?.url ? fetch(logsFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
       ])
       traces = Array.isArray(tracesData) ? tracesData : (tracesData?.data ?? [])
       logs = Array.isArray(logsData) ? logsData : (logsData?.data ?? [])
     } else {
       const tracesUrl = new URL(
         `/v0/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions/${debugSession._id}/otel-traces`,
-        mcpConfig.apiUrl
+        mcpConfig.apiUrl,
       )
       tracesUrl.searchParams.set('skip', '0')
       tracesUrl.searchParams.set('limit', '300')
       const logsUrl = new URL(
         `/v0/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions/${debugSession._id}/otel-logs`,
-        mcpConfig.apiUrl
+        mcpConfig.apiUrl,
       )
       logsUrl.searchParams.set('skip', '0')
       logsUrl.searchParams.set('limit', '300')
       const [tracesRes, logsRes] = await Promise.all([
         fetch(tracesUrl.toString(), {
-          headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType)
+          headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
         }),
         fetch(logsUrl.toString(), {
-          headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType)
-        })
+          headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
+        }),
       ])
       traces = tracesRes.ok ? ((await tracesRes.json()) as any).data : []
       logs = logsRes.ok ? ((await logsRes.json()) as any).data : []
@@ -507,7 +483,7 @@ export const fetchIssueDebugContext = async (
 
     return {
       context: JSON.stringify({ sessionId: debugSession._id, issueSpan, traces, logs }),
-      debugSessionId: debugSession._id
+      debugSessionId: debugSession._id,
     }
   } catch {
     return undefined
@@ -523,16 +499,16 @@ export const fetchDebugSessionContext = async (
   debugSessionId: string,
   workspaceId: string,
   projectId: string,
-  mcpConfig: McpConfig
+  mcpConfig: McpConfig,
 ): Promise<{ context: string; sessionSketches: SessionSketch[] } | undefined> => {
   try {
     // Fetch the session to find S3 file URLs if available
     const sessionUrl = new URL(
       `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}`,
-      mcpConfig.apiUrl
+      mcpConfig.apiUrl,
     )
     const sessionRes = await fetch(sessionUrl.toString(), {
-      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType)
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
     })
     if (!sessionRes.ok) return undefined
     const debugSession = (await sessionRes.json()) as any
@@ -545,26 +521,26 @@ export const fetchDebugSessionContext = async (
       const logsFile = (debugSession.s3Files as any[]).find((f: any) => f.dataType === 'OTLP_LOGS')
       const [tracesData, logsData] = await Promise.all([
         tracesFile?.url ? fetch(tracesFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
-        logsFile?.url ? fetch(logsFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([])
+        logsFile?.url ? fetch(logsFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
       ])
       traces = Array.isArray(tracesData) ? tracesData : (tracesData?.data ?? [])
       logs = Array.isArray(logsData) ? logsData : (logsData?.data ?? [])
     } else {
       const tracesUrl = new URL(
         `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-traces`,
-        mcpConfig.apiUrl
+        mcpConfig.apiUrl,
       )
       tracesUrl.searchParams.set('skip', '0')
       tracesUrl.searchParams.set('limit', '300')
       const logsUrl = new URL(
         `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-logs`,
-        mcpConfig.apiUrl
+        mcpConfig.apiUrl,
       )
       logsUrl.searchParams.set('skip', '0')
       logsUrl.searchParams.set('limit', '300')
       const [tracesRes, logsRes] = await Promise.all([
         fetch(tracesUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
-        fetch(logsUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) })
+        fetch(logsUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
       ])
       traces = tracesRes.ok ? ((await tracesRes.json()) as any).data : []
       logs = logsRes.ok ? ((await logsRes.json()) as any).data : []
@@ -573,16 +549,16 @@ export const fetchDebugSessionContext = async (
     // Fetch rrweb events and session notes in parallel
     const rrwebUrl = new URL(
       `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/rrweb-events`,
-      mcpConfig.apiUrl
+      mcpConfig.apiUrl,
     )
     rrwebUrl.searchParams.set('limit', '5000')
     const notesUrl = new URL(
       `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/session-notes/context`,
-      mcpConfig.apiUrl
+      mcpConfig.apiUrl,
     )
     const [rrwebRes, notesRes] = await Promise.all([
       fetch(rrwebUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
-      fetch(notesUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) })
+      fetch(notesUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
     ])
     const rawRrweb = rrwebRes.ok ? ((await rrwebRes.json()) as any) : null
     const notesData: { notes: unknown[]; sketches: SessionSketch[] } | null = notesRes.ok
@@ -596,7 +572,7 @@ export const fetchDebugSessionContext = async (
 
     return {
       context: JSON.stringify({ sessionId: debugSessionId, traces, logs, sessionNotes, rrwebTimeline }),
-      sessionSketches
+      sessionSketches,
     }
   } catch {
     return undefined
@@ -612,17 +588,17 @@ export const fetchDebugSessionSnapshot = async (
   timestampMs: number,
   workspaceId: string,
   projectId: string,
-  mcpConfig: McpConfig
+  mcpConfig: McpConfig,
 ): Promise<string | undefined> => {
   try {
     const url = new URL(
       `/v0/assets/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/notes/snapshot`,
-      mcpConfig.apiUrl
+      mcpConfig.apiUrl,
     )
     url.searchParams.set('timestamp', String(Math.floor(timestampMs)))
 
     const res = await fetch(url.toString(), {
-      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType)
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
     })
     if (!res.ok) {
       const errorBody = await res.text().catch(() => '')
@@ -704,7 +680,7 @@ export const buildAttachedSessionContextDoc = (debugSessionId: string, debugCont
         '### Raw OTLP Spans',
         '```json',
         JSON.stringify(sanitizeCapturedValue(parsedCtx.traces), null, 2),
-        '```'
+        '```',
       )
     }
   }
@@ -729,7 +705,7 @@ const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image
  * Silently skips attachments that fail to fetch.
  */
 export const fetchAttachmentContent = async (
-  attachments: Array<{ name: string; url?: string; mimeType?: string }>
+  attachments: Array<{ name: string; url?: string; mimeType?: string }>,
 ): Promise<{ textBlocks: string[]; images: string[] }> => {
   const textBlocks: string[] = []
   const images: string[] = []
@@ -768,7 +744,7 @@ export const fetchAttachmentContent = async (
         // Non-fatal — log and continue so the text portion still reaches the agent
         logger.warn(`fetchAttachmentContent: error fetching "${name}": ${String(err)}`)
       }
-    })
+    }),
   )
 
   return { textBlocks, images }
@@ -783,35 +759,19 @@ export const analyseIssueContext = async (
   markdown: string,
   model: string,
   modelKey: string,
-  modelUrl?: string
+  modelUrl?: string,
 ): Promise<IssueAnalysis> => {
-  const systemPrompt = ANALYSE_ISSUE_SYSTEM_PROMPT
-  const userMessage = buildAnalyseIssueUserMessage(markdown)
-
   try {
-    if (model === 'claude-code' || isAnthropicModel(model)) {
-      const claudeModel = model === 'claude-code' ? undefined : model
-      const text = await runClaudeCodePrompt(`${systemPrompt}\n\n${userMessage}`, claudeModel)
-      return JSON.parse(text) as IssueAnalysis
-    }
-
-    const openai = buildOpenAiClient(modelKey, model, modelUrl)
-    const response = await openai.chat.completions.create({
-      model,
-      max_tokens: 100,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage }
-      ]
+    const provider = createProvider({ model, apiKey: modelKey, baseUrl: modelUrl })
+    const { text } = await provider.complete({
+      systemPrompt: ANALYSE_ISSUE_SYSTEM_PROMPT,
+      userMessage: buildAnalyseIssueUserMessage(markdown),
+      maxTokens: 100,
     })
-    const text = response.choices[0]?.message?.content ?? ''
     return JSON.parse(text) as IssueAnalysis
   } catch {
     // Fall back to a conservative default so the agent still runs
-    return {
-      fixabilityScore: 70,
-      severity: 'medium'
-    }
+    return { fixabilityScore: 70, severity: 'medium' }
   }
 }
 
@@ -835,7 +795,7 @@ const extractSpanData = (span: any): SpanData => {
         exception = {
           type: ea['exception.type'],
           message: ea['exception.message'],
-          stacktrace: ea['exception.stacktrace']
+          stacktrace: ea['exception.stacktrace'],
         }
         break
       }
@@ -858,7 +818,7 @@ const extractSpanData = (span: any): SpanData => {
       exception = {
         type: evAttrs['exception.type'],
         message: evAttrs['exception.message'],
-        stacktrace: evAttrs['exception.stacktrace']
+        stacktrace: evAttrs['exception.stacktrace'],
       }
       break
     }
@@ -870,7 +830,7 @@ const SPAN_ATTR_SKIP = new Set([
   'multiplayer.project._id',
   'multiplayer.workspace._id',
   'multiplayer.debug_session._id',
-  'multiplayer.integration._id'
+  'multiplayer.integration._id',
 ])
 
 const safeCapturedText = (value: unknown, maxLength?: number): string => {
@@ -881,7 +841,7 @@ const safeCapturedText = (value: unknown, maxLength?: number): string => {
 export const buildIssueContextDoc = (
   issue: Issue,
   release: Release | undefined,
-  debugContext: string | undefined
+  debugContext: string | undefined,
 ): string => {
   // Extract span data upfront so we can use it throughout the document
   let parsedCtx: { sessionId?: string; issueSpan?: any; traces?: any[]; logs?: any[] } | undefined
@@ -905,7 +865,7 @@ export const buildIssueContextDoc = (
     '',
     `**Component Hash:** \`${issue.componentHash}\``,
     `**Category:** ${issue.category}`,
-    `**Service:** ${issue.service.serviceName}`
+    `**Service:** ${issue.service.serviceName}`,
   ]
 
   if (issue.service.environment) {
@@ -939,7 +899,7 @@ export const buildIssueContextDoc = (
     if (issue.metadata.function) capturedLines.push(`**Function:** ${safeCapturedText(issue.metadata.function)}`)
     if (issue.metadata.httpMethod && issue.metadata.httpRoute) {
       capturedLines.push(
-        `**HTTP:** ${safeCapturedText(issue.metadata.httpMethod)} ${safeCapturedText(issue.metadata.httpRoute)}`
+        `**HTTP:** ${safeCapturedText(issue.metadata.httpMethod)} ${safeCapturedText(issue.metadata.httpRoute)}`,
       )
     }
     if (issue.metadata.value) capturedLines.push(`**Value:** ${safeCapturedText(issue.metadata.value)}`)
@@ -963,7 +923,7 @@ export const buildIssueContextDoc = (
 
       // Span attributes — skip internal multiplayer fields and already-shown exception fields
       const attrEntries = Object.entries(spanData.attributes).filter(
-        ([k, v]) => v != null && v !== '' && !SPAN_ATTR_SKIP.has(k) && !k.startsWith('exception.')
+        ([k, v]) => v != null && v !== '' && !SPAN_ATTR_SKIP.has(k) && !k.startsWith('exception.'),
       )
       if (attrEntries.length > 0) {
         capturedLines.push('', '**Span Attributes:**')
@@ -1007,7 +967,7 @@ export const buildIssueContextDoc = (
         '### Raw OTLP Spans',
         '```json',
         JSON.stringify(sanitizeCapturedValue(parsedCtx.traces), null, 2),
-        '```'
+        '```',
       )
     }
 
@@ -1017,7 +977,7 @@ export const buildIssueContextDoc = (
         '### Raw OTLP Logs',
         '```json',
         JSON.stringify(sanitizeCapturedValue(parsedCtx.logs), null, 2),
-        '```'
+        '```',
       )
     }
   }
@@ -1035,677 +995,171 @@ export const buildIssueContextDoc = (
 
 export { buildIssuePromptFallback }
 
+const makeDebugSessionApiCall = async (
+  url: URL,
+  mcpConfig: McpConfig,
+): Promise<CallToolResult> => {
+  try {
+    const res = await fetch(url.toString(), {
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
+    })
+    if (!res.ok) {
+      return { content: [{ type: 'text', text: `API error ${res.status}: ${res.statusText}` }], isError: true }
+    }
+    const data = await res.json()
+    return { content: [{ type: 'text', text: JSON.stringify(data) }] }
+  } catch (err) {
+    return {
+      content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+      isError: true,
+    }
+  }
+}
+
 /**
- * Builds an in-process MCP server that exposes a `get_debug_session_context` tool.
- * The LLM can call this tool when it needs the full traces/logs/rrweb/notes for a
- * debug session that was referenced in a context attachment.
+ * Builds an in-process MCP server exposing 4 granular debug-session tools.
+ * The LLM calls whichever tools it needs on demand instead of loading everything upfront.
  */
 export const buildDebugSessionMcpServer = (
   mcpConfig: McpConfig,
   workspaceId: string,
-  projectId: string
+  projectId: string,
 ): McpServerConfig => {
-  const getDebugSessionContextTool = tool(
-    'get_debug_session_context',
-    'Fetch the full debug context (traces, logs, rrweb timeline, and session notes) for a Multiplayer debug session. Use this when a debug session was attached to the conversation and you need its observability data.',
-    {
-      debugSessionId: z.string().describe('The ID of the debug session to fetch context for')
+  const base = `${mcpConfig.apiUrl}/v0/radar/workspaces/${workspaceId}/projects/${projectId}`
+  const debugSessionId = z.string().describe('The debug session ID')
+
+  const tracesTool = tool(
+    'get_debug_session_traces',
+    'Fetch OTLP traces for a Multiplayer debug session.',
+    { debugSessionId },
+    async ({ debugSessionId: id }): Promise<CallToolResult> => {
+      const url = new URL(`${base}/debug-sessions/${id}/otel-traces`)
+      url.searchParams.set('skip', '0')
+      url.searchParams.set('limit', '300')
+      return makeDebugSessionApiCall(url, mcpConfig)
     },
-    async ({ debugSessionId }): Promise<CallToolResult> => {
-      try {
-        const result = await fetchDebugSessionContext(debugSessionId, workspaceId, projectId, mcpConfig)
-        if (!result) {
-          return {
-            content: [{ type: 'text', text: `No debug context found for session ${debugSessionId}` }],
-            isError: true
-          }
-        }
-        const markdown = buildAttachedSessionContextDoc(debugSessionId, result.context)
-        const sketchNote =
-          result.sessionSketches.length > 0
-            ? `\n\n*${result.sessionSketches.length} sketch image(s) are stored in S3 — see the chat attachments for visual content.*`
-            : ''
-        return {
-          content: [{ type: 'text', text: `${markdown}${sketchNote}` }]
-        }
-      } catch (err) {
-        return {
-          content: [
-            { type: 'text', text: `Error fetching debug context: ${err instanceof Error ? err.message : String(err)}` }
-          ],
-          isError: true
-        }
-      }
-    }
+  )
+
+  const logsTool = tool(
+    'get_debug_session_logs',
+    'Fetch OTLP logs for a Multiplayer debug session.',
+    { debugSessionId },
+    async ({ debugSessionId: id }): Promise<CallToolResult> => {
+      const url = new URL(`${base}/debug-sessions/${id}/otel-logs`)
+      url.searchParams.set('skip', '0')
+      url.searchParams.set('limit', '300')
+      return makeDebugSessionApiCall(url, mcpConfig)
+    },
+  )
+
+  const notesTool = tool(
+    'get_debug_session_notes',
+    'Fetch session notes and sketches for a Multiplayer debug session.',
+    { debugSessionId },
+    async ({ debugSessionId: id }): Promise<CallToolResult> => {
+      const url = new URL(`${base}/debug-sessions/${id}/session-notes/context`)
+      return makeDebugSessionApiCall(url, mcpConfig)
+    },
+  )
+
+  const rrwebTool = tool(
+    'get_debug_session_rrweb_timeline',
+    'Fetch the rrweb UI recording timeline for a Multiplayer debug session.',
+    { debugSessionId },
+    async ({ debugSessionId: id }): Promise<CallToolResult> => {
+      const url = new URL(`${base}/debug-sessions/${id}/rrweb-events`)
+      url.searchParams.set('limit', '5000')
+      return makeDebugSessionApiCall(url, mcpConfig)
+    },
   )
 
   return createSdkMcpServer({
     name: 'multiplayer-debug-sessions',
     version: '1.0.0',
-    tools: [getDebugSessionContextTool]
+    tools: [tracesTool, logsTool, notesTool, rrwebTool],
   })
 }
 
-const readFileSafe = (projectDir: string, filePath: string): string => {
-  try {
-    const resolved = path.resolve(projectDir, filePath)
-    // Security: ensure the resolved path is within the project directory
-    if (!resolved.startsWith(path.resolve(projectDir))) {
-      return 'Error: Access denied - path outside project directory'
-    }
-    if (!fs.existsSync(resolved)) {
-      return `Error: File not found: ${filePath}`
-    }
-    const stat = fs.statSync(resolved)
-    if (stat.isDirectory()) {
-      const entries = fs.readdirSync(resolved).slice(0, 50)
-      return `Directory contents:\n${entries.join('\n')}`
-    }
-    const content = fs.readFileSync(resolved, 'utf-8')
-    if (content.length > MAX_FILE_SIZE) {
-      return content.slice(0, MAX_FILE_SIZE) + `\n\n[... truncated at ${MAX_FILE_SIZE} chars ...]`
-    }
-    return content
-  } catch (err: any) {
-    return `Error reading file: ${err.message}`
-  }
-}
-
-const applyPatches = (projectDir: string, patches: FilePatch[]): void => {
-  for (const patch of patches) {
-    const resolved = path.resolve(projectDir, patch.filePath)
-    if (!resolved.startsWith(path.resolve(projectDir))) {
-      throw new Error(`Security: patch path ${patch.filePath} is outside project directory`)
-    }
-    const dir = path.dirname(resolved)
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(resolved, patch.newContent, 'utf-8')
-  }
-}
-
-const openAiTools: OpenAI.Chat.ChatCompletionTool[] = [
-  {
-    type: 'function',
-    function: {
-      name: 'read_file',
-      description: 'Read the content of a file or directory in the project',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Relative path from the project root'
-          }
-        },
-        required: ['path']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'write_patch',
-      description: 'Write the final list of file patches to fix the issue',
-      parameters: {
-        type: 'object',
-        properties: {
-          patches: {
-            type: 'array',
-            description: 'List of file patches',
-            items: {
-              type: 'object',
-              properties: {
-                filePath: { type: 'string' },
-                newContent: { type: 'string' }
-              },
-              required: ['filePath', 'newContent']
-            }
-          }
-        },
-        required: ['patches']
-      }
-    }
-  }
-]
-
-// ─── Shared Claude Code stream processing ─────────────────────────────────────
-
-type PendingToolCall = { id: string; name: string; inputJson: string }
-type RunningToolCall = { name: string; input: Record<string, unknown> }
-
 /**
- * Processes a user message from the Claude SDK, extracting tool results and
- * firing the onToolCallResult callback for any completed tool calls.
+ * Starts a Claude session seeded with a debug session analysis prompt.
+ * The agent uses MCP tools to fetch traces/logs/notes/rrweb on demand.
  */
-const processClaudeToolResults = (
-  msg: any,
-  callbacks: StreamCallbacks,
-  runningToolCalls: Map<string, RunningToolCall>
-): void => {
-  if (msg.type !== 'user' || !callbacks.onToolCallResult || !Array.isArray(msg.message?.content)) return
-
-  for (const block of msg.message.content) {
-    if (block.type !== 'tool_result') continue
-    const id = block.tool_use_id as string
-    const data = runningToolCalls.get(id)
-    if (!data) continue
-
-    const outputContent = Array.isArray(block.content)
-      ? block.content.map((c: any) => c.text ?? '').join('')
-      : typeof block.content === 'string'
-        ? block.content
-        : ''
-
-    callbacks.onToolCallResult({
-      id,
-      ...data,
-      status: block.is_error ? 'failed' : 'succeeded',
-      output: { content: outputContent }
-    })
-    runningToolCalls.delete(id)
-  }
-}
-
-/**
- * Processes a single stream_event from the Claude SDK, updating streaming state
- * and firing progress/tool callbacks. Pass onText to accumulate assistant text.
- */
-const processClaudeStreamEvent = (
-  event: any,
-  callbacks: StreamCallbacks,
-  pendingToolCallRef: { current: PendingToolCall | null },
-  runningToolCalls: Map<string, RunningToolCall>,
-  onText?: (text: string) => void
-): void => {
-  if (event.type === 'message_start') {
-    callbacks.onTurnStart?.()
-    // Flush any tool calls that never received a dedicated tool_result message
-    if (callbacks.onToolCallResult) {
-      for (const [id, data] of runningToolCalls) {
-        callbacks.onToolCallResult({ id, ...data, status: 'succeeded' })
-      }
-      runningToolCalls.clear()
-    }
-  } else if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
-    if (callbacks.onToolCall || callbacks.onToolCallResult) {
-      pendingToolCallRef.current = {
-        id: event.content_block.id,
-        name: event.content_block.name,
-        inputJson: ''
-      }
-    }
-  } else if (event.type === 'content_block_delta') {
-    if (event.delta?.type === 'text_delta') {
-      callbacks.onProgress?.(event.delta.text)
-      onText?.(event.delta.text)
-    } else if (event.delta?.type === 'input_json_delta' && pendingToolCallRef.current) {
-      pendingToolCallRef.current.inputJson += event.delta.partial_json ?? ''
-    }
-  } else if (event.type === 'content_block_stop' && pendingToolCallRef.current) {
-    let input: Record<string, unknown>
-    try {
-      input = pendingToolCallRef.current.inputJson ? JSON.parse(pendingToolCallRef.current.inputJson) : {}
-    } catch {
-      input = {}
-    }
-    callbacks.onToolCall?.({
-      id: pendingToolCallRef.current.id,
-      name: pendingToolCallRef.current.name,
-      input
-    })
-    if (callbacks.onToolCallResult) {
-      runningToolCalls.set(pendingToolCallRef.current.id, {
-        name: pendingToolCallRef.current.name,
-        input
-      })
-    }
-    pendingToolCallRef.current = null
-  }
-}
-
-// ─── OpenAI tool loop ─────────────────────────────────────────────────────────
-
-const runOpenAiLoop = async (
-  client: OpenAI,
-  model: string,
-  messages: OpenAI.Chat.ChatCompletionMessageParam[],
+export const startDebugSessionChat = async (
+  debugSessionId: string,
   projectDir: string,
+  mcpConfig: McpConfig,
+  workspaceId: string,
+  projectId: string,
+  model: string,
+  modelKey: string,
+  modelUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
-  handleExtraTool?: (name: string, input: Record<string, unknown>) => Promise<string>
-): Promise<{ patches: FilePatch[]; finalContent: string }> => {
-  const { onProgress, onToolCall, onToolCallResult, onTurnStart, confirmToolCall } = callbacks
-  let filesRead = 0
-  let patches: FilePatch[] = []
-  let finalContent = ''
+): Promise<string> => {
+  const seedPrompt = `Debug session \`${debugSessionId}\` has been opened. Use the available tools (\`get_debug_session_traces\`, \`get_debug_session_logs\`, \`get_debug_session_notes\`, \`get_debug_session_rrweb_timeline\`) to investigate this session and provide a comprehensive summary: what happened, any errors or anomalies, and notable user interactions.`
+  const history: ConversationMessage[] = [{ role: 'user', content: seedPrompt }]
+  const mcpServers = {
+    'multiplayer-debug-sessions': buildDebugSessionMcpServer(mcpConfig, workspaceId, projectId),
+  }
+  return continueChat(history, projectDir, model, modelKey, modelUrl, abortSignal, callbacks, mcpServers)
+}
 
-  for (let i = 0; i < 20; i++) {
-    if (abortSignal?.aborted) {
-      onProgress?.('aborted')
-      break
-    }
+// ─── Event → callback adapter ─────────────────────────────────────────────────
 
-    onTurnStart?.()
-    onProgress?.(`Thinking (turn ${i + 1})...`)
+/**
+ * Iterates over provider events and dispatches them to the StreamCallbacks that
+ * the rest of the application uses. This is the only place that knows about
+ * both the library's event model and the application's callback model.
+ *
+ * Returns the final text and any patches collected during the session.
+ */
+async function dispatchAgentEvents(
+  events: AsyncIterable<AgentStreamEvent>,
+  callbacks: StreamCallbacks,
+): Promise<{ finalText: string; patches: FilePatch[] }> {
+  let finalText = ''
+  const patches: FilePatch[] = []
 
-    const response = await client.chat.completions.create({
-      model,
-      messages,
-      tools: openAiTools,
-      tool_choice: 'auto'
-    })
-
-    const choice = response.choices[0]
-    if (!choice) break
-
-    if (choice.message.content) {
-      finalContent += choice.message.content
-      onProgress?.(choice.message.content)
-    }
-
-    messages.push(choice.message as OpenAI.Chat.ChatCompletionMessageParam)
-
-    if (choice.finish_reason === 'stop') {
-      break
-    }
-
-    if (choice.finish_reason === 'tool_calls' && choice.message.tool_calls) {
-      for (const toolCall of choice.message.tool_calls) {
-        if (toolCall.type !== 'function') continue
-        let result: string
-        let toolInput: Record<string, unknown> = {}
-        let toolStatus: 'succeeded' | 'failed' = 'succeeded'
-
-        if (toolCall.function.name === 'read_file') {
-          toolInput = JSON.parse(toolCall.function.arguments) as {
-            path: string
-          }
-          onProgress?.(`[read] ${(toolInput as { path: string }).path}`)
-          onToolCall?.({
-            id: toolCall.id,
-            name: toolCall.function.name,
-            input: toolInput
-          })
-          filesRead++
-          result =
-            filesRead <= MAX_FILES_TO_READ
-              ? readFileSafe(projectDir, (toolInput as { path: string }).path)
-              : 'Error: Maximum file reads reached'
-          if (result.startsWith('Error:')) toolStatus = 'failed'
-        } else if (toolCall.function.name === 'write_patch') {
-          toolInput = JSON.parse(toolCall.function.arguments) as {
-            patches: FilePatch[]
-          }
-          onToolCall?.({
-            id: toolCall.id,
-            name: toolCall.function.name,
-            input: toolInput
-          })
-
-          if (confirmToolCall && CONFIRM_REQUIRED_TOOLS.has('write_patch')) {
-            onProgress?.('[patch] Waiting for user confirmation...')
-            const { approved, userResponse } = await confirmToolCall(toolCall.id, 'write_patch', toolInput)
-            if (!approved) {
-              result = userResponse ?? 'Patch rejected by user'
-              toolStatus = 'failed'
-            } else {
-              patches = (toolInput as { patches: FilePatch[] }).patches
-              onProgress?.(`[patch] Writing ${patches.length} file(s)`)
-              result = `Patches recorded: ${patches.length} file(s)`
-            }
-          } else {
-            patches = (toolInput as { patches: FilePatch[] }).patches
-            onProgress?.(`[patch] Writing ${patches.length} file(s)`)
-            result = `Patches recorded: ${patches.length} file(s)`
-          }
-        } else if (handleExtraTool) {
-          toolInput = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
-          onToolCall?.({
-            id: toolCall.id,
-            name: toolCall.function.name,
-            input: toolInput
-          })
-          onProgress?.(`[${toolCall.function.name}] fetching...`)
-          try {
-            result = await handleExtraTool(toolCall.function.name, toolInput)
-          } catch (err: any) {
-            result = `Error: ${err.message}`
-            toolStatus = 'failed'
-          }
-        } else {
-          toolInput = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
-          onToolCall?.({
-            id: toolCall.id,
-            name: toolCall.function.name,
-            input: toolInput
-          })
-          result = `Unknown tool: ${toolCall.function.name}`
-          toolStatus = 'failed'
-        }
-
-        onToolCallResult?.({
-          id: toolCall.id,
-          name: toolCall.function.name,
-          input: toolInput,
-          status: toolStatus,
-          output: { content: result }
-        })
-
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: result
-        })
-      }
-
-      if (patches.length > 0) {
+  for await (const event of events) {
+    switch (event.type) {
+      case 'turn_start':
+        callbacks.onTurnStart?.()
         break
-      }
+      case 'text_delta':
+        callbacks.onProgress?.(event.text)
+        break
+      case 'tool_call':
+        callbacks.onToolCall?.(event)
+        break
+      case 'tool_result':
+        callbacks.onToolCallResult?.(event)
+        break
+      case 'progress':
+        callbacks.onProgress?.(event.message)
+        break
+      case 'patch':
+        patches.push(...event.patches)
+        break
+      case 'done':
+        finalText = event.finalText
+        break
+      case 'aborted':
+        callbacks.onProgress?.('[aborted]')
+        break
+      case 'error':
+        throw event.error
+      // 'tool_confirm' is emitted before the provider calls confirmToolCall —
+      // the UI reacts to the tool_call event instead, so no action needed here.
     }
   }
 
-  return { patches, finalContent }
-}
-
-// ─── OpenAI-compatible implementation ────────────────────────────────────────
-
-const resolveIssueWithOpenAI = async (
-  _issue: Issue,
-  projectDir: string,
-  prompt: string,
-  model: string,
-  apiKey: string,
-  baseUrl: string | undefined,
-  abortSignal: AbortSignal | undefined,
-  callbacks: StreamCallbacks,
-  isDemoProject?: boolean
-): Promise<FilePatch[]> => {
-  const client = buildOpenAiClient(apiKey, model, baseUrl)
-
-  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildDebuggingSystemPrompt(undefined, isDemoProject) },
-    { role: 'user', content: prompt }
-  ]
-
-  const { patches } = await runOpenAiLoop(client, model, messages, projectDir, abortSignal, callbacks)
-  return patches
-}
-
-// ─── Claude Code implementation ───────────────────────────────────────────────
-
-const runClaudeCodePrompt = async (prompt: string, model?: string): Promise<string> => {
-  let text = ''
-  for await (const message of query({
-    prompt,
-    options: {
-      cwd: process.cwd(),
-      executable: 'node',
-      pathToClaudeCodeExecutable: cliPath,
-      permissionMode: 'acceptEdits',
-      settingSources: [],
-      maxTurns: 1,
-      ...(model ? { model } : {})
-    }
-  })) {
-    const msg = message as any
-    if (msg.type === 'result' && msg.subtype === 'success') {
-      text = msg.result ?? ''
-    }
-  }
-  return text
-}
-
-const resolveIssueWithClaudeCode = async (
-  _issue: Issue,
-  projectDir: string,
-  prompt: string,
-  model: string | undefined,
-  abortSignal: AbortSignal | undefined,
-  callbacks: StreamCallbacks,
-  isDemoProject?: boolean
-): Promise<FilePatch[]> => {
-  const absProjectDir = path.resolve(projectDir)
-  const git = simpleGit(absProjectDir)
-
-  const pendingToolCall: { current: PendingToolCall | null } = {
-    current: null
-  }
-  const runningToolCalls = new Map<string, RunningToolCall>()
-
-  callbacks.onProgress?.(`[claude] starting (cwd=${absProjectDir}, cli=${cliPath})`)
-
-  // Replace OpenAI-path patch language with direct-edit instructions for Claude Code
-  const claudePrompt = prompt.replace(
-    /please analyze this issue and produce file patches to fix it\. read relevant source files based on the stacktrace and error details above\./gi,
-    'Fix the issue by directly editing the relevant source files using the Edit or Write tools. Read the relevant source files based on the stacktrace and error details above, then apply the fix.'
-  )
-
-  for await (const message of query({
-    prompt: claudePrompt,
-    options: {
-      cwd: absProjectDir,
-      executable: 'node',
-      pathToClaudeCodeExecutable: cliPath,
-      permissionMode: 'acceptEdits',
-      settingSources: [],
-      settings: {
-        claudeMdExcludes: ['**'],
-        permissions: {
-          allow: ['Bash(*)']
-        }
-      },
-      systemPrompt: {
-        type: 'preset',
-        preset: 'claude_code',
-        append: buildClaudeCodeDebuggingSystemPrompt(absProjectDir, isDemoProject)
-      },
-      maxTurns: 1000,
-      includePartialMessages: !!(callbacks.onProgress || callbacks.onToolCall),
-      ...(model ? { model } : {}),
-      stderr: (data: string) => {
-        const line = data.trim()
-        if (line) callbacks.onProgress?.(`[claude stderr] ${line}`)
-      }
-    }
-  })) {
-    if (abortSignal?.aborted) {
-      callbacks.onProgress?.('[aborted]')
-      break
-    }
-
-    const msg = message as any
-
-    processClaudeToolResults(msg, callbacks, runningToolCalls)
-
-    if (msg.type === 'stream_event') {
-      processClaudeStreamEvent(msg.event, callbacks, pendingToolCall, runningToolCalls)
-    } else if (callbacks.onProgress) {
-      if (msg.type === 'tool_progress') {
-        callbacks.onProgress(`[${msg.tool_name}] ${msg.elapsed_time_seconds.toFixed(1)}s...`)
-      } else if (msg.type === 'system' && msg.subtype === 'task_progress') {
-        callbacks.onProgress(msg.description)
-      } else if (msg.type === 'result') {
-        callbacks.onProgress(msg.subtype)
-      }
-    }
-
-    if (message.type === 'result' && message.subtype !== 'success') {
-      const msg = message as any
-      const errors: string[] = msg.errors ?? []
-      const detail = errors.length > 0 ? `\n${errors.join('\n')}` : ''
-      const subtypeLabel: Record<string, string> = {
-        error_during_execution: 'Error during execution',
-        error_max_turns: 'Max turns reached',
-        error_max_budget_usd: 'Budget limit exceeded',
-        error_max_structured_output_retries: 'Structured output retries exceeded'
-      }
-      const label = subtypeLabel[msg.subtype] ?? msg.subtype
-      throw new Error(`Claude Code process exited: ${label}${detail}`)
-    }
-  }
-
-  if (abortSignal?.aborted) return []
-
-  const status = await git.status()
-  const changedFiles = [...status.modified, ...status.created, ...status.not_added]
-
-  return changedFiles.map((filePath) => ({
-    filePath,
-    newContent: fs.readFileSync(path.resolve(absProjectDir, filePath), 'utf-8')
-  }))
-}
-
-// ─── Continue chat (multi-turn) ───────────────────────────────────────────────
-
-const continueChatWithOpenAI = async (
-  history: ConversationMessage[],
-  projectDir: string,
-  model: string,
-  apiKey: string,
-  baseUrl: string | undefined,
-  abortSignal: AbortSignal | undefined,
-  callbacks: StreamCallbacks
-): Promise<string> => {
-  const client = buildOpenAiClient(apiKey, model, baseUrl)
-
-  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildDebuggingSystemPrompt() },
-    ...history.map((m): OpenAI.Chat.ChatCompletionMessageParam => {
-      if (m.role === 'user' && m.images?.length) {
-        // Vision: multipart content with text + image URLs.
-        // Omit the text block when content is empty — some providers reject blank
-        // text content blocks and require at least one non-empty block.
-        const textBlock = m.content ? [{ type: 'text' as const, text: m.content }] : []
-        return {
-          role: 'user',
-          content: [
-            ...textBlock,
-            ...m.images.map((dataUrl) => ({
-              type: 'image_url' as const,
-              image_url: { url: dataUrl }
-            }))
-          ]
-        } satisfies OpenAI.Chat.ChatCompletionUserMessageParam
-      }
-      return { role: m.role, content: m.content }
-    })
-  ]
-
-  const { finalContent } = await runOpenAiLoop(client, model, messages, projectDir, abortSignal, callbacks)
-  return finalContent
-}
-
-const continueChatWithClaudeCode = async (
-  history: ConversationMessage[],
-  projectDir: string,
-  model: string | undefined,
-  abortSignal: AbortSignal | undefined,
-  callbacks: StreamCallbacks,
-  mcpServers?: Record<string, McpServerConfig>
-): Promise<string> => {
-  if (!history.length) {
-    throw new Error('EMPTY_HISTORY')
-  }
-
-  // For historical context, images become short placeholders — we cannot pass
-  // prior-turn images as content blocks through the XML history serialisation,
-  // and embedding raw base64 in text would waste the entire context window.
-  const serializeHistoryMessage = (m: ConversationMessage): string => {
-    let text = m.content
-    if (m.images?.length) {
-      text += '\n\n' + m.images.map((_, i) => `[Image ${i + 1}: attached]`).join('\n')
-    }
-    return text
-  }
-
-  const contextLines = history.slice(0, -1).map((m) => `<${m.role}>\n${serializeHistoryMessage(m)}\n</${m.role}>`)
-  const lastMessage = history[history.length - 1]!
-
-  // Text portion of the current turn (conversation context + user text)
-  const textContent =
-    contextLines.length > 0
-      ? `<conversation_history>\n${contextLines.join('\n\n')}\n</conversation_history>\n\n${lastMessage.content}`
-      : lastMessage.content
-
-  // When the current turn has images, use the multimodal SDKUserMessage form so
-  // Claude receives proper image blocks instead of raw base64 strings in text.
-  const buildPrompt = (): Parameters<typeof query>[0]['prompt'] => {
-    if (!lastMessage.images?.length) return textContent
-
-    const imageBlocks: Anthropic.ImageBlockParam[] = lastMessage.images.map((dataUrl) => {
-      const commaIdx = dataUrl.indexOf(',')
-      const meta = dataUrl.slice(0, commaIdx) // e.g. "data:image/jpeg;base64"
-      const data = dataUrl.slice(commaIdx + 1)
-      const mediaType = meta.replace('data:', '').replace(';base64', '') as
-        | 'image/jpeg'
-        | 'image/png'
-        | 'image/gif'
-        | 'image/webp'
-      return { type: 'image', source: { type: 'base64', media_type: mediaType, data } }
-    })
-
-    const content: Anthropic.ContentBlockParam[] = [{ type: 'text', text: textContent }, ...imageBlocks]
-
-    return (async function* () {
-      yield {
-        type: 'user' as const,
-        message: { role: 'user' as const, content } as Anthropic.MessageParam,
-        parent_tool_use_id: null
-      }
-    })() as any
-  }
-
-  const prompt = buildPrompt()
-
-  let response = ''
-  const pendingToolCall: { current: PendingToolCall | null } = {
-    current: null
-  }
-  const runningToolCalls = new Map<string, RunningToolCall>()
-
-  for await (const message of query({
-    prompt,
-    options: {
-      cwd: projectDir,
-      executable: 'node',
-      pathToClaudeCodeExecutable: cliPath,
-      permissionMode: 'bypassPermissions',
-      systemPrompt: buildDebuggingSystemPrompt(projectDir),
-      maxTurns: 250,
-      includePartialMessages: !!(callbacks.onProgress || callbacks.onToolCall || callbacks.onToolCallResult),
-      ...(model ? { model } : {}),
-      ...(mcpServers ? { mcpServers } : {}),
-      stderr: (data: string) => {
-        const line = data.trim()
-        if (line) callbacks.onProgress?.(`[claude stderr] ${line}`)
-      }
-    }
-  })) {
-    if (abortSignal?.aborted) {
-      callbacks.onProgress?.('[aborted]')
-      break
-    }
-
-    const msg = message as any
-
-    processClaudeToolResults(msg, callbacks, runningToolCalls)
-
-    if (msg.type === 'stream_event') {
-      processClaudeStreamEvent(msg.event, callbacks, pendingToolCall, runningToolCalls, (text) => {
-        response += text
-      })
-    } else if (msg.type === 'result') {
-      callbacks.onProgress?.('')
-    }
-  }
-
-  return response
+  return { finalText, patches }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export const resolveIssue = async (
-  issue: Issue,
+  _issue: Issue,
   projectDir: string,
   prompt: string,
   model: string,
@@ -1713,30 +1167,20 @@ export const resolveIssue = async (
   modelUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
-  isDemoProject?: boolean
+  isDemoProject?: boolean,
 ): Promise<FilePatch[]> => {
-  if (model === 'claude-code' || isAnthropicModel(model)) {
-    // Claude Code SDK handles tool execution internally — confirmation dialogs are not supported
-    const claudeModel = model === 'claude-code' ? undefined : model
-    return resolveIssueWithClaudeCode(issue, projectDir, prompt, claudeModel, abortSignal, callbacks, isDemoProject)
-  }
-
-  const patches = await resolveIssueWithOpenAI(
-    issue,
-    projectDir,
-    prompt,
-    model,
-    modelKey,
-    modelUrl ?? getProviderDefaultBaseUrl(model),
-    abortSignal,
+  const provider = createProvider({ model, apiKey: modelKey, baseUrl: modelUrl })
+  const { patches } = await dispatchAgentEvents(
+    provider.runAgentic({
+      history: [{ role: 'user', content: prompt }],
+      projectDir,
+      confirmToolCall: callbacks.confirmToolCall,
+      abortSignal,
+      isFixFlow: true,
+      isDemoProject,
+    }),
     callbacks,
-    isDemoProject
   )
-
-  if (patches.length > 0) {
-    applyPatches(projectDir, patches)
-  }
-
   return patches
 }
 
@@ -1746,41 +1190,24 @@ export const generatePrContent = async (
   diffStats: { additions: number; deletions: number },
   model: string,
   modelKey?: string,
-  modelUrl?: string
+  modelUrl?: string,
 ): Promise<{ title: string; body: string }> => {
-  const systemPrompt = PR_GENERATION_SYSTEM_PROMPT
-
   const conversationContext = history
     .map((m) => `[${m.role}]: ${m.content}`)
     .join('\n\n')
     .slice(0, 4000)
 
-  const userMessage = buildPrUserMessage(issue, conversationContext, diffStats)
-
   try {
-    let text: string
-    if (model === 'claude-code' || isAnthropicModel(model)) {
-      const claudeModel = model === 'claude-code' ? undefined : model
-      text = await runClaudeCodePrompt(`${systemPrompt}\n\n${userMessage}`, claudeModel)
-    } else {
-      const openai = buildOpenAiClient(modelKey ?? '', model, modelUrl)
-      const response = await openai.chat.completions.create({
-        model,
-        max_tokens: 1024,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMessage }
-        ]
-      })
-      text = response.choices[0]?.message?.content ?? ''
-    }
+    const provider = createProvider({ model, apiKey: modelKey ?? '', baseUrl: modelUrl })
+    const { text } = await provider.complete({
+      systemPrompt: PR_GENERATION_SYSTEM_PROMPT,
+      userMessage: buildPrUserMessage(issue, conversationContext, diffStats),
+      maxTokens: 1024,
+    })
     const match = text.match(/\{[\s\S]*\}/)
-
     if (match) {
       const parsed = JSON.parse(match[0]) as { title?: string; body?: string }
-      if (parsed.title && parsed.body) {
-        return { title: parsed.title, body: parsed.body }
-      }
+      if (parsed.title && parsed.body) return { title: parsed.title, body: parsed.body }
     }
   } catch {
     // Fall through to default
@@ -1788,10 +1215,7 @@ export const generatePrContent = async (
 
   return {
     title: `fix: ${issue.title}`,
-    body: `Fixes issue \`${issue.componentHash}\`.
-    \n\nChanges: +${diffStats.additions}/-${diffStats.deletions} lines.
-    [issue](${issue.url})
-    `
+    body: `Fixes issue \`${issue.componentHash}\`.\n\nChanges: +${diffStats.additions}/-${diffStats.deletions} lines.\n[issue](${issue.url})`,
   }
 }
 
@@ -1803,19 +1227,19 @@ export const continueChat = async (
   modelUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
-  mcpServers?: Record<string, McpServerConfig>
+  mcpServers?: Record<string, McpServerConfig>,
 ): Promise<string> => {
-  if (model === 'claude-code' || isAnthropicModel(model)) {
-    const claudeModel = model === 'claude-code' ? undefined : model
-    return continueChatWithClaudeCode(history, projectDir, claudeModel, abortSignal, callbacks, mcpServers)
-  }
-  return continueChatWithOpenAI(
-    history,
-    projectDir,
-    model,
-    modelKey,
-    modelUrl ?? getProviderDefaultBaseUrl(model),
-    abortSignal,
-    callbacks
+  const provider = createProvider({ model, apiKey: modelKey, baseUrl: modelUrl })
+  const llmHistory = history.map((m) => ({ role: m.role, content: m.content, images: m.images }))
+  const { finalText } = await dispatchAgentEvents(
+    provider.runAgentic({
+      history: llmHistory,
+      projectDir,
+      mcpServers,
+      confirmToolCall: callbacks.confirmToolCall,
+      abortSignal,
+    }),
+    callbacks,
   )
+  return finalText
 }
