@@ -18,7 +18,7 @@ import { getAuthHeaders } from '../lib/authHeaders.js'
 import {
   escapePromptMarkup,
   sanitizeCapturedValue,
-  wrapUntrustedObservabilityData,
+  wrapUntrustedObservabilityData
 } from '../lib/untrustedObservability.js'
 import {
   buildChatTitlePrompt,
@@ -28,7 +28,7 @@ import {
   PR_GENERATION_SYSTEM_PROMPT,
   buildPrUserMessage,
   buildIssuePromptFallback,
-  buildClaudeCodeDebuggingSystemPrompt,
+  buildClaudeCodeDebuggingSystemPrompt
 } from '../prompts.js'
 
 const execAsync = promisify(exec)
@@ -109,8 +109,7 @@ export const checkClaudeRequirements = async (model?: string): Promise<void> => 
     claudeAuthLog('[claude-auth] ANTHROPIC_API_KEY is set — skipping interactive login probe')
   } else {
     const loginError = new Error(
-      'Claude Code is not authenticated.\n' +
-        'Open a new terminal, run "claude" and complete login, then press Retry.',
+      'Claude Code is not authenticated.\n' + 'Open a new terminal, run "claude" and complete login, then press Retry.'
     )
     await probeClaudeLoginViaCli(loginError)
   }
@@ -140,8 +139,8 @@ export const verifyClaudeModel = async (model?: string): Promise<void> => {
         permissionMode: 'bypassPermissions',
         settingSources: [],
         maxTurns: 1,
-        model,
-      },
+        model
+      }
     })) {
       const msg = message as any
       if (msg.type === 'result' && msg.subtype !== 'success') {
@@ -158,7 +157,7 @@ export const verifyClaudeModel = async (model?: string): Promise<void> => {
     claudeAuthLog(`[claude-auth] model ${model} verification failed: ${modelError}`)
     throw new Error(
       `Selected model "${model}" is unavailable or failed verification:\n${modelError}\n\n` +
-        'Pick a different model with --model.',
+        'Pick a different model with --model.'
     )
   }
   claudeAuthLog(`[claude-auth] model ${model} verified`)
@@ -193,7 +192,7 @@ export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string, 
   }
   const client = new OpenAI({
     apiKey,
-    ...(baseUrl ? { baseURL: baseUrl } : {}),
+    ...(baseUrl ? { baseURL: baseUrl } : {})
   })
   let modelIds: string[]
   try {
@@ -211,7 +210,9 @@ export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string, 
   // Only gate on the model when the provider actually returns a list — some
   // OpenAI-compatible endpoints return nothing, and we shouldn't false-fail there.
   if (model && modelIds.length > 0 && !modelIds.includes(model)) {
-    throw new Error(`Selected model "${model}" is not available from this provider. Pick a different model with --model.`)
+    throw new Error(
+      `Selected model "${model}" is not available from this provider. Pick a different model with --model.`
+    )
   }
 }
 
@@ -332,7 +333,7 @@ export const generateChatTitle = async (
   issue: Issue,
   model: string,
   modelKey: string,
-  modelUrl?: string,
+  modelUrl?: string
 ): Promise<string> => {
   const prompt = buildChatTitlePrompt(issue)
 
@@ -345,7 +346,7 @@ export const generateChatTitle = async (
       const response = await client.chat.completions.create({
         model,
         max_tokens: 64,
-        messages: [{ role: 'user', content: prompt }],
+        messages: [{ role: 'user', content: prompt }]
       })
       return response.choices[0]?.message?.content?.trim() ?? issue.title
     }
@@ -383,7 +384,7 @@ const buildOpenAiClient = (apiKey: string, model: string, baseUrl?: string): Ope
   return new OpenAI({
     apiKey,
     ...(effectiveBaseUrl ? { baseURL: effectiveBaseUrl } : {}),
-    ...(openRouterHeaders ? { defaultHeaders: openRouterHeaders } : {}),
+    ...(openRouterHeaders ? { defaultHeaders: openRouterHeaders } : {})
   })
 }
 
@@ -440,19 +441,19 @@ const buildRrwebTimeline = (events: any[]): string => {
 
 export const fetchIssueDebugContext = async (
   issue: Issue,
-  mcpConfig: McpConfig,
+  mcpConfig: McpConfig
 ): Promise<{ context: string; debugSessionId: string } | undefined> => {
   try {
     const listUrl = new URL(
       `/v0/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions`,
-      mcpConfig.apiUrl,
+      mcpConfig.apiUrl
     )
     listUrl.searchParams.set('issueComponentHash', issue.componentHash)
     listUrl.searchParams.set('limit', '1')
     listUrl.searchParams.set('sortKey', 'createdAt')
     listUrl.searchParams.set('sortDirection', '-1')
     const listRes = await fetch(listUrl.toString(), {
-      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType)
     })
     if (!listRes.ok) return undefined
     const listData = (await listRes.json()) as any
@@ -461,7 +462,7 @@ export const fetchIssueDebugContext = async (
 
     // Find the span ID for this specific issue in the session
     const sessionIssue = (debugSession.issues as any[] | undefined)?.find(
-      (i: any) => i.issueComponentHash === issue.componentHash,
+      (i: any) => i.issueComponentHash === issue.componentHash
     )
     const targetSpanId = sessionIssue?.spanId as string | undefined
 
@@ -473,30 +474,30 @@ export const fetchIssueDebugContext = async (
       const logsFile = (debugSession.s3Files as any[]).find((f: any) => f.dataType === 'OTLP_LOGS')
       const [tracesData, logsData] = await Promise.all([
         tracesFile?.url ? fetch(tracesFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
-        logsFile?.url ? fetch(logsFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
+        logsFile?.url ? fetch(logsFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([])
       ])
       traces = Array.isArray(tracesData) ? tracesData : (tracesData?.data ?? [])
       logs = Array.isArray(logsData) ? logsData : (logsData?.data ?? [])
     } else {
       const tracesUrl = new URL(
         `/v0/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions/${debugSession._id}/otel-traces`,
-        mcpConfig.apiUrl,
+        mcpConfig.apiUrl
       )
       tracesUrl.searchParams.set('skip', '0')
       tracesUrl.searchParams.set('limit', '300')
       const logsUrl = new URL(
         `/v0/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions/${debugSession._id}/otel-logs`,
-        mcpConfig.apiUrl,
+        mcpConfig.apiUrl
       )
       logsUrl.searchParams.set('skip', '0')
       logsUrl.searchParams.set('limit', '300')
       const [tracesRes, logsRes] = await Promise.all([
         fetch(tracesUrl.toString(), {
-          headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
+          headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType)
         }),
         fetch(logsUrl.toString(), {
-          headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
-        }),
+          headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType)
+        })
       ])
       traces = tracesRes.ok ? ((await tracesRes.json()) as any).data : []
       logs = logsRes.ok ? ((await logsRes.json()) as any).data : []
@@ -506,7 +507,7 @@ export const fetchIssueDebugContext = async (
 
     return {
       context: JSON.stringify({ sessionId: debugSession._id, issueSpan, traces, logs }),
-      debugSessionId: debugSession._id,
+      debugSessionId: debugSession._id
     }
   } catch {
     return undefined
@@ -522,16 +523,16 @@ export const fetchDebugSessionContext = async (
   debugSessionId: string,
   workspaceId: string,
   projectId: string,
-  mcpConfig: McpConfig,
+  mcpConfig: McpConfig
 ): Promise<{ context: string; sessionSketches: SessionSketch[] } | undefined> => {
   try {
     // Fetch the session to find S3 file URLs if available
     const sessionUrl = new URL(
       `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}`,
-      mcpConfig.apiUrl,
+      mcpConfig.apiUrl
     )
     const sessionRes = await fetch(sessionUrl.toString(), {
-      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType)
     })
     if (!sessionRes.ok) return undefined
     const debugSession = (await sessionRes.json()) as any
@@ -544,26 +545,26 @@ export const fetchDebugSessionContext = async (
       const logsFile = (debugSession.s3Files as any[]).find((f: any) => f.dataType === 'OTLP_LOGS')
       const [tracesData, logsData] = await Promise.all([
         tracesFile?.url ? fetch(tracesFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
-        logsFile?.url ? fetch(logsFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
+        logsFile?.url ? fetch(logsFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([])
       ])
       traces = Array.isArray(tracesData) ? tracesData : (tracesData?.data ?? [])
       logs = Array.isArray(logsData) ? logsData : (logsData?.data ?? [])
     } else {
       const tracesUrl = new URL(
         `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-traces`,
-        mcpConfig.apiUrl,
+        mcpConfig.apiUrl
       )
       tracesUrl.searchParams.set('skip', '0')
       tracesUrl.searchParams.set('limit', '300')
       const logsUrl = new URL(
         `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-logs`,
-        mcpConfig.apiUrl,
+        mcpConfig.apiUrl
       )
       logsUrl.searchParams.set('skip', '0')
       logsUrl.searchParams.set('limit', '300')
       const [tracesRes, logsRes] = await Promise.all([
         fetch(tracesUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
-        fetch(logsUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
+        fetch(logsUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) })
       ])
       traces = tracesRes.ok ? ((await tracesRes.json()) as any).data : []
       logs = logsRes.ok ? ((await logsRes.json()) as any).data : []
@@ -572,16 +573,16 @@ export const fetchDebugSessionContext = async (
     // Fetch rrweb events and session notes in parallel
     const rrwebUrl = new URL(
       `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/rrweb-events`,
-      mcpConfig.apiUrl,
+      mcpConfig.apiUrl
     )
     rrwebUrl.searchParams.set('limit', '5000')
     const notesUrl = new URL(
       `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/session-notes/context`,
-      mcpConfig.apiUrl,
+      mcpConfig.apiUrl
     )
     const [rrwebRes, notesRes] = await Promise.all([
       fetch(rrwebUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
-      fetch(notesUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
+      fetch(notesUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) })
     ])
     const rawRrweb = rrwebRes.ok ? ((await rrwebRes.json()) as any) : null
     const notesData: { notes: unknown[]; sketches: SessionSketch[] } | null = notesRes.ok
@@ -595,9 +596,47 @@ export const fetchDebugSessionContext = async (
 
     return {
       context: JSON.stringify({ sessionId: debugSessionId, traces, logs, sessionNotes, rrwebTimeline }),
-      sessionSketches,
+      sessionSketches
     }
   } catch {
+    return undefined
+  }
+}
+
+/**
+ * Render a session recording frame at a playback timestamp via the assets service.
+ * Uses the same rrweb + puppeteer pipeline as session note sketch screenshots.
+ */
+export const fetchDebugSessionSnapshot = async (
+  debugSessionId: string,
+  timestampMs: number,
+  workspaceId: string,
+  projectId: string,
+  mcpConfig: McpConfig
+): Promise<string | undefined> => {
+  try {
+    const url = new URL(
+      `/v0/assets/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/notes/snapshot`,
+      mcpConfig.apiUrl
+    )
+    url.searchParams.set('timestamp', String(Math.floor(timestampMs)))
+
+    const res = await fetch(url.toString(), {
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType)
+    })
+    if (!res.ok) {
+      const errorBody = await res.text().catch(() => '')
+      logger.warn(
+        `fetchDebugSessionSnapshot: HTTP ${res.status} for session ${debugSessionId} @ ${timestampMs}ms${errorBody ? `: ${errorBody.slice(0, 200)}` : ''}`,
+      )
+      return undefined
+    }
+
+    const buf = await res.arrayBuffer()
+    const b64 = Buffer.from(buf).toString('base64')
+    return `data:image/jpeg;base64,${b64}`
+  } catch (err) {
+    logger.warn(`fetchDebugSessionSnapshot: ${String(err)}`)
     return undefined
   }
 }
@@ -606,11 +645,10 @@ export const fetchDebugSessionContext = async (
  * Build a standalone context document for a manually-attached debug session
  * (no issue metadata available).
  */
-export const buildAttachedSessionContextDoc = (
-  debugSessionId: string,
-  debugContext: string,
-): string => {
-  let parsedCtx: { sessionId?: string; traces?: any[]; logs?: any[]; sessionNotes?: any[]; rrwebTimeline?: string } | undefined
+export const buildAttachedSessionContextDoc = (debugSessionId: string, debugContext: string): string => {
+  let parsedCtx:
+    | { sessionId?: string; traces?: any[]; logs?: any[]; sessionNotes?: any[]; rrwebTimeline?: string }
+    | undefined
   if (debugContext) {
     try {
       parsedCtx = JSON.parse(debugContext)
@@ -619,11 +657,7 @@ export const buildAttachedSessionContextDoc = (
     }
   }
 
-  const lines: string[] = [
-    '# Attached Session Recording',
-    '',
-    `**Session ID:** \`${debugSessionId}\``,
-  ]
+  const lines: string[] = ['# Attached Session Recording', '', `**Session ID:** \`${debugSessionId}\``]
 
   const capturedLines: string[] = []
 
@@ -670,7 +704,7 @@ export const buildAttachedSessionContextDoc = (
         '### Raw OTLP Spans',
         '```json',
         JSON.stringify(sanitizeCapturedValue(parsedCtx.traces), null, 2),
-        '```',
+        '```'
       )
     }
   }
@@ -695,7 +729,7 @@ const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image
  * Silently skips attachments that fail to fetch.
  */
 export const fetchAttachmentContent = async (
-  attachments: Array<{ name: string; url?: string; mimeType?: string }>,
+  attachments: Array<{ name: string; url?: string; mimeType?: string }>
 ): Promise<{ textBlocks: string[]; images: string[] }> => {
   const textBlocks: string[] = []
   const images: string[] = []
@@ -734,7 +768,7 @@ export const fetchAttachmentContent = async (
         // Non-fatal — log and continue so the text portion still reaches the agent
         logger.warn(`fetchAttachmentContent: error fetching "${name}": ${String(err)}`)
       }
-    }),
+    })
   )
 
   return { textBlocks, images }
@@ -749,7 +783,7 @@ export const analyseIssueContext = async (
   markdown: string,
   model: string,
   modelKey: string,
-  modelUrl?: string,
+  modelUrl?: string
 ): Promise<IssueAnalysis> => {
   const systemPrompt = ANALYSE_ISSUE_SYSTEM_PROMPT
   const userMessage = buildAnalyseIssueUserMessage(markdown)
@@ -767,8 +801,8 @@ export const analyseIssueContext = async (
       max_tokens: 100,
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
+        { role: 'user', content: userMessage }
+      ]
     })
     const text = response.choices[0]?.message?.content ?? ''
     return JSON.parse(text) as IssueAnalysis
@@ -776,7 +810,7 @@ export const analyseIssueContext = async (
     // Fall back to a conservative default so the agent still runs
     return {
       fixabilityScore: 70,
-      severity: 'medium',
+      severity: 'medium'
     }
   }
 }
@@ -801,7 +835,7 @@ const extractSpanData = (span: any): SpanData => {
         exception = {
           type: ea['exception.type'],
           message: ea['exception.message'],
-          stacktrace: ea['exception.stacktrace'],
+          stacktrace: ea['exception.stacktrace']
         }
         break
       }
@@ -824,7 +858,7 @@ const extractSpanData = (span: any): SpanData => {
       exception = {
         type: evAttrs['exception.type'],
         message: evAttrs['exception.message'],
-        stacktrace: evAttrs['exception.stacktrace'],
+        stacktrace: evAttrs['exception.stacktrace']
       }
       break
     }
@@ -836,7 +870,7 @@ const SPAN_ATTR_SKIP = new Set([
   'multiplayer.project._id',
   'multiplayer.workspace._id',
   'multiplayer.debug_session._id',
-  'multiplayer.integration._id',
+  'multiplayer.integration._id'
 ])
 
 const safeCapturedText = (value: unknown, maxLength?: number): string => {
@@ -847,7 +881,7 @@ const safeCapturedText = (value: unknown, maxLength?: number): string => {
 export const buildIssueContextDoc = (
   issue: Issue,
   release: Release | undefined,
-  debugContext: string | undefined,
+  debugContext: string | undefined
 ): string => {
   // Extract span data upfront so we can use it throughout the document
   let parsedCtx: { sessionId?: string; issueSpan?: any; traces?: any[]; logs?: any[] } | undefined
@@ -871,7 +905,7 @@ export const buildIssueContextDoc = (
     '',
     `**Component Hash:** \`${issue.componentHash}\``,
     `**Category:** ${issue.category}`,
-    `**Service:** ${issue.service.serviceName}`,
+    `**Service:** ${issue.service.serviceName}`
   ]
 
   if (issue.service.environment) {
@@ -905,7 +939,7 @@ export const buildIssueContextDoc = (
     if (issue.metadata.function) capturedLines.push(`**Function:** ${safeCapturedText(issue.metadata.function)}`)
     if (issue.metadata.httpMethod && issue.metadata.httpRoute) {
       capturedLines.push(
-        `**HTTP:** ${safeCapturedText(issue.metadata.httpMethod)} ${safeCapturedText(issue.metadata.httpRoute)}`,
+        `**HTTP:** ${safeCapturedText(issue.metadata.httpMethod)} ${safeCapturedText(issue.metadata.httpRoute)}`
       )
     }
     if (issue.metadata.value) capturedLines.push(`**Value:** ${safeCapturedText(issue.metadata.value)}`)
@@ -929,7 +963,7 @@ export const buildIssueContextDoc = (
 
       // Span attributes — skip internal multiplayer fields and already-shown exception fields
       const attrEntries = Object.entries(spanData.attributes).filter(
-        ([k, v]) => v != null && v !== '' && !SPAN_ATTR_SKIP.has(k) && !k.startsWith('exception.'),
+        ([k, v]) => v != null && v !== '' && !SPAN_ATTR_SKIP.has(k) && !k.startsWith('exception.')
       )
       if (attrEntries.length > 0) {
         capturedLines.push('', '**Span Attributes:**')
@@ -973,7 +1007,7 @@ export const buildIssueContextDoc = (
         '### Raw OTLP Spans',
         '```json',
         JSON.stringify(sanitizeCapturedValue(parsedCtx.traces), null, 2),
-        '```',
+        '```'
       )
     }
 
@@ -983,7 +1017,7 @@ export const buildIssueContextDoc = (
         '### Raw OTLP Logs',
         '```json',
         JSON.stringify(sanitizeCapturedValue(parsedCtx.logs), null, 2),
-        '```',
+        '```'
       )
     }
   }
@@ -1009,13 +1043,13 @@ export { buildIssuePromptFallback }
 export const buildDebugSessionMcpServer = (
   mcpConfig: McpConfig,
   workspaceId: string,
-  projectId: string,
+  projectId: string
 ): McpServerConfig => {
   const getDebugSessionContextTool = tool(
     'get_debug_session_context',
     'Fetch the full debug context (traces, logs, rrweb timeline, and session notes) for a Multiplayer debug session. Use this when a debug session was attached to the conversation and you need its observability data.',
     {
-      debugSessionId: z.string().describe('The ID of the debug session to fetch context for'),
+      debugSessionId: z.string().describe('The ID of the debug session to fetch context for')
     },
     async ({ debugSessionId }): Promise<CallToolResult> => {
       try {
@@ -1023,7 +1057,7 @@ export const buildDebugSessionMcpServer = (
         if (!result) {
           return {
             content: [{ type: 'text', text: `No debug context found for session ${debugSessionId}` }],
-            isError: true,
+            isError: true
           }
         }
         const markdown = buildAttachedSessionContextDoc(debugSessionId, result.context)
@@ -1032,21 +1066,23 @@ export const buildDebugSessionMcpServer = (
             ? `\n\n*${result.sessionSketches.length} sketch image(s) are stored in S3 — see the chat attachments for visual content.*`
             : ''
         return {
-          content: [{ type: 'text', text: `${markdown}${sketchNote}` }],
+          content: [{ type: 'text', text: `${markdown}${sketchNote}` }]
         }
       } catch (err) {
         return {
-          content: [{ type: 'text', text: `Error fetching debug context: ${err instanceof Error ? err.message : String(err)}` }],
-          isError: true,
+          content: [
+            { type: 'text', text: `Error fetching debug context: ${err instanceof Error ? err.message : String(err)}` }
+          ],
+          isError: true
         }
       }
-    },
+    }
   )
 
   return createSdkMcpServer({
     name: 'multiplayer-debug-sessions',
     version: '1.0.0',
-    tools: [getDebugSessionContextTool],
+    tools: [getDebugSessionContextTool]
   })
 }
 
@@ -1098,12 +1134,12 @@ const openAiTools: OpenAI.Chat.ChatCompletionTool[] = [
         properties: {
           path: {
             type: 'string',
-            description: 'Relative path from the project root',
-          },
+            description: 'Relative path from the project root'
+          }
         },
-        required: ['path'],
-      },
-    },
+        required: ['path']
+      }
+    }
   },
   {
     type: 'function',
@@ -1120,16 +1156,16 @@ const openAiTools: OpenAI.Chat.ChatCompletionTool[] = [
               type: 'object',
               properties: {
                 filePath: { type: 'string' },
-                newContent: { type: 'string' },
+                newContent: { type: 'string' }
               },
-              required: ['filePath', 'newContent'],
-            },
-          },
+              required: ['filePath', 'newContent']
+            }
+          }
         },
-        required: ['patches'],
-      },
-    },
-  },
+        required: ['patches']
+      }
+    }
+  }
 ]
 
 // ─── Shared Claude Code stream processing ─────────────────────────────────────
@@ -1144,7 +1180,7 @@ type RunningToolCall = { name: string; input: Record<string, unknown> }
 const processClaudeToolResults = (
   msg: any,
   callbacks: StreamCallbacks,
-  runningToolCalls: Map<string, RunningToolCall>,
+  runningToolCalls: Map<string, RunningToolCall>
 ): void => {
   if (msg.type !== 'user' || !callbacks.onToolCallResult || !Array.isArray(msg.message?.content)) return
 
@@ -1164,7 +1200,7 @@ const processClaudeToolResults = (
       id,
       ...data,
       status: block.is_error ? 'failed' : 'succeeded',
-      output: { content: outputContent },
+      output: { content: outputContent }
     })
     runningToolCalls.delete(id)
   }
@@ -1179,7 +1215,7 @@ const processClaudeStreamEvent = (
   callbacks: StreamCallbacks,
   pendingToolCallRef: { current: PendingToolCall | null },
   runningToolCalls: Map<string, RunningToolCall>,
-  onText?: (text: string) => void,
+  onText?: (text: string) => void
 ): void => {
   if (event.type === 'message_start') {
     callbacks.onTurnStart?.()
@@ -1195,7 +1231,7 @@ const processClaudeStreamEvent = (
       pendingToolCallRef.current = {
         id: event.content_block.id,
         name: event.content_block.name,
-        inputJson: '',
+        inputJson: ''
       }
     }
   } else if (event.type === 'content_block_delta') {
@@ -1215,12 +1251,12 @@ const processClaudeStreamEvent = (
     callbacks.onToolCall?.({
       id: pendingToolCallRef.current.id,
       name: pendingToolCallRef.current.name,
-      input,
+      input
     })
     if (callbacks.onToolCallResult) {
       runningToolCalls.set(pendingToolCallRef.current.id, {
         name: pendingToolCallRef.current.name,
-        input,
+        input
       })
     }
     pendingToolCallRef.current = null
@@ -1236,7 +1272,7 @@ const runOpenAiLoop = async (
   projectDir: string,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
-  handleExtraTool?: (name: string, input: Record<string, unknown>) => Promise<string>,
+  handleExtraTool?: (name: string, input: Record<string, unknown>) => Promise<string>
 ): Promise<{ patches: FilePatch[]; finalContent: string }> => {
   const { onProgress, onToolCall, onToolCallResult, onTurnStart, confirmToolCall } = callbacks
   let filesRead = 0
@@ -1256,7 +1292,7 @@ const runOpenAiLoop = async (
       model,
       messages,
       tools: openAiTools,
-      tool_choice: 'auto',
+      tool_choice: 'auto'
     })
 
     const choice = response.choices[0]
@@ -1288,7 +1324,7 @@ const runOpenAiLoop = async (
           onToolCall?.({
             id: toolCall.id,
             name: toolCall.function.name,
-            input: toolInput,
+            input: toolInput
           })
           filesRead++
           result =
@@ -1303,7 +1339,7 @@ const runOpenAiLoop = async (
           onToolCall?.({
             id: toolCall.id,
             name: toolCall.function.name,
-            input: toolInput,
+            input: toolInput
           })
 
           if (confirmToolCall && CONFIRM_REQUIRED_TOOLS.has('write_patch')) {
@@ -1327,7 +1363,7 @@ const runOpenAiLoop = async (
           onToolCall?.({
             id: toolCall.id,
             name: toolCall.function.name,
-            input: toolInput,
+            input: toolInput
           })
           onProgress?.(`[${toolCall.function.name}] fetching...`)
           try {
@@ -1341,7 +1377,7 @@ const runOpenAiLoop = async (
           onToolCall?.({
             id: toolCall.id,
             name: toolCall.function.name,
-            input: toolInput,
+            input: toolInput
           })
           result = `Unknown tool: ${toolCall.function.name}`
           toolStatus = 'failed'
@@ -1352,13 +1388,13 @@ const runOpenAiLoop = async (
           name: toolCall.function.name,
           input: toolInput,
           status: toolStatus,
-          output: { content: result },
+          output: { content: result }
         })
 
         messages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
-          content: result,
+          content: result
         })
       }
 
@@ -1382,13 +1418,13 @@ const resolveIssueWithOpenAI = async (
   baseUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
-  isDemoProject?: boolean,
+  isDemoProject?: boolean
 ): Promise<FilePatch[]> => {
   const client = buildOpenAiClient(apiKey, model, baseUrl)
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: 'system', content: buildDebuggingSystemPrompt(undefined, isDemoProject) },
-    { role: 'user', content: prompt },
+    { role: 'user', content: prompt }
   ]
 
   const { patches } = await runOpenAiLoop(client, model, messages, projectDir, abortSignal, callbacks)
@@ -1408,8 +1444,8 @@ const runClaudeCodePrompt = async (prompt: string, model?: string): Promise<stri
       permissionMode: 'acceptEdits',
       settingSources: [],
       maxTurns: 1,
-      ...(model ? { model } : {}),
-    },
+      ...(model ? { model } : {})
+    }
   })) {
     const msg = message as any
     if (msg.type === 'result' && msg.subtype === 'success') {
@@ -1426,13 +1462,13 @@ const resolveIssueWithClaudeCode = async (
   model: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
-  isDemoProject?: boolean,
+  isDemoProject?: boolean
 ): Promise<FilePatch[]> => {
   const absProjectDir = path.resolve(projectDir)
   const git = simpleGit(absProjectDir)
 
   const pendingToolCall: { current: PendingToolCall | null } = {
-    current: null,
+    current: null
   }
   const runningToolCalls = new Map<string, RunningToolCall>()
 
@@ -1441,7 +1477,7 @@ const resolveIssueWithClaudeCode = async (
   // Replace OpenAI-path patch language with direct-edit instructions for Claude Code
   const claudePrompt = prompt.replace(
     /please analyze this issue and produce file patches to fix it\. read relevant source files based on the stacktrace and error details above\./gi,
-    'Fix the issue by directly editing the relevant source files using the Edit or Write tools. Read the relevant source files based on the stacktrace and error details above, then apply the fix.',
+    'Fix the issue by directly editing the relevant source files using the Edit or Write tools. Read the relevant source files based on the stacktrace and error details above, then apply the fix.'
   )
 
   for await (const message of query({
@@ -1455,13 +1491,13 @@ const resolveIssueWithClaudeCode = async (
       settings: {
         claudeMdExcludes: ['**'],
         permissions: {
-          allow: ['Bash(*)'],
-        },
+          allow: ['Bash(*)']
+        }
       },
       systemPrompt: {
         type: 'preset',
         preset: 'claude_code',
-        append: buildClaudeCodeDebuggingSystemPrompt(absProjectDir, isDemoProject),
+        append: buildClaudeCodeDebuggingSystemPrompt(absProjectDir, isDemoProject)
       },
       maxTurns: 1000,
       includePartialMessages: !!(callbacks.onProgress || callbacks.onToolCall),
@@ -1469,8 +1505,8 @@ const resolveIssueWithClaudeCode = async (
       stderr: (data: string) => {
         const line = data.trim()
         if (line) callbacks.onProgress?.(`[claude stderr] ${line}`)
-      },
-    },
+      }
+    }
   })) {
     if (abortSignal?.aborted) {
       callbacks.onProgress?.('[aborted]')
@@ -1501,7 +1537,7 @@ const resolveIssueWithClaudeCode = async (
         error_during_execution: 'Error during execution',
         error_max_turns: 'Max turns reached',
         error_max_budget_usd: 'Budget limit exceeded',
-        error_max_structured_output_retries: 'Structured output retries exceeded',
+        error_max_structured_output_retries: 'Structured output retries exceeded'
       }
       const label = subtypeLabel[msg.subtype] ?? msg.subtype
       throw new Error(`Claude Code process exited: ${label}${detail}`)
@@ -1515,7 +1551,7 @@ const resolveIssueWithClaudeCode = async (
 
   return changedFiles.map((filePath) => ({
     filePath,
-    newContent: fs.readFileSync(path.resolve(absProjectDir, filePath), 'utf-8'),
+    newContent: fs.readFileSync(path.resolve(absProjectDir, filePath), 'utf-8')
   }))
 }
 
@@ -1528,7 +1564,7 @@ const continueChatWithOpenAI = async (
   apiKey: string,
   baseUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
-  callbacks: StreamCallbacks,
+  callbacks: StreamCallbacks
 ): Promise<string> => {
   const client = buildOpenAiClient(apiKey, model, baseUrl)
 
@@ -1546,13 +1582,13 @@ const continueChatWithOpenAI = async (
             ...textBlock,
             ...m.images.map((dataUrl) => ({
               type: 'image_url' as const,
-              image_url: { url: dataUrl },
-            })),
-          ],
+              image_url: { url: dataUrl }
+            }))
+          ]
         } satisfies OpenAI.Chat.ChatCompletionUserMessageParam
       }
       return { role: m.role, content: m.content }
-    }),
+    })
   ]
 
   const { finalContent } = await runOpenAiLoop(client, model, messages, projectDir, abortSignal, callbacks)
@@ -1565,7 +1601,7 @@ const continueChatWithClaudeCode = async (
   model: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
-  mcpServers?: Record<string, McpServerConfig>,
+  mcpServers?: Record<string, McpServerConfig>
 ): Promise<string> => {
   if (!history.length) {
     throw new Error('EMPTY_HISTORY')
@@ -1608,16 +1644,13 @@ const continueChatWithClaudeCode = async (
       return { type: 'image', source: { type: 'base64', media_type: mediaType, data } }
     })
 
-    const content: Anthropic.ContentBlockParam[] = [
-      { type: 'text', text: textContent },
-      ...imageBlocks,
-    ]
+    const content: Anthropic.ContentBlockParam[] = [{ type: 'text', text: textContent }, ...imageBlocks]
 
     return (async function* () {
       yield {
         type: 'user' as const,
         message: { role: 'user' as const, content } as Anthropic.MessageParam,
-        parent_tool_use_id: null,
+        parent_tool_use_id: null
       }
     })() as any
   }
@@ -1626,7 +1659,7 @@ const continueChatWithClaudeCode = async (
 
   let response = ''
   const pendingToolCall: { current: PendingToolCall | null } = {
-    current: null,
+    current: null
   }
   const runningToolCalls = new Map<string, RunningToolCall>()
 
@@ -1645,8 +1678,8 @@ const continueChatWithClaudeCode = async (
       stderr: (data: string) => {
         const line = data.trim()
         if (line) callbacks.onProgress?.(`[claude stderr] ${line}`)
-      },
-    },
+      }
+    }
   })) {
     if (abortSignal?.aborted) {
       callbacks.onProgress?.('[aborted]')
@@ -1680,7 +1713,7 @@ export const resolveIssue = async (
   modelUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
-  isDemoProject?: boolean,
+  isDemoProject?: boolean
 ): Promise<FilePatch[]> => {
   if (model === 'claude-code' || isAnthropicModel(model)) {
     // Claude Code SDK handles tool execution internally — confirmation dialogs are not supported
@@ -1697,7 +1730,7 @@ export const resolveIssue = async (
     modelUrl ?? getProviderDefaultBaseUrl(model),
     abortSignal,
     callbacks,
-    isDemoProject,
+    isDemoProject
   )
 
   if (patches.length > 0) {
@@ -1713,7 +1746,7 @@ export const generatePrContent = async (
   diffStats: { additions: number; deletions: number },
   model: string,
   modelKey?: string,
-  modelUrl?: string,
+  modelUrl?: string
 ): Promise<{ title: string; body: string }> => {
   const systemPrompt = PR_GENERATION_SYSTEM_PROMPT
 
@@ -1736,8 +1769,8 @@ export const generatePrContent = async (
         max_tokens: 1024,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMessage },
-        ],
+          { role: 'user', content: userMessage }
+        ]
       })
       text = response.choices[0]?.message?.content ?? ''
     }
@@ -1758,7 +1791,7 @@ export const generatePrContent = async (
     body: `Fixes issue \`${issue.componentHash}\`.
     \n\nChanges: +${diffStats.additions}/-${diffStats.deletions} lines.
     [issue](${issue.url})
-    `,
+    `
   }
 }
 
@@ -1770,11 +1803,19 @@ export const continueChat = async (
   modelUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
-  mcpServers?: Record<string, McpServerConfig>,
+  mcpServers?: Record<string, McpServerConfig>
 ): Promise<string> => {
   if (model === 'claude-code' || isAnthropicModel(model)) {
     const claudeModel = model === 'claude-code' ? undefined : model
     return continueChatWithClaudeCode(history, projectDir, claudeModel, abortSignal, callbacks, mcpServers)
   }
-  return continueChatWithOpenAI(history, projectDir, model, modelKey, modelUrl ?? getProviderDefaultBaseUrl(model), abortSignal, callbacks)
+  return continueChatWithOpenAI(
+    history,
+    projectDir,
+    model,
+    modelKey,
+    modelUrl ?? getProviderDefaultBaseUrl(model),
+    abortSignal,
+    callbacks
+  )
 }
