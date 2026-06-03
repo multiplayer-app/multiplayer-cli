@@ -300,7 +300,7 @@ const resolveDebugSessionAttachments = async (params: {
 
   if (isClaudeModel(model)) {
     const idList = debugSessionIds.map((id) => `\`${id}\``).join(', ')
-    messageContent = `${messageContent}\n\n> Debug session${debugSessionIds.length > 1 ? 's' : ''} attached: ${idList}. Use the \`get_debug_session_context\` tool to fetch traces, logs, and notes for ${debugSessionIds.length > 1 ? 'each session' : 'this session'}.`
+    messageContent = `${messageContent}\n\n> Debug session${debugSessionIds.length > 1 ? 's' : ''} attached: ${idList}. Use the \`get_debug_session_traces\`, \`get_debug_session_logs\`, \`get_debug_session_notes\`, and \`get_debug_session_rrweb_timeline\` tools to investigate ${debugSessionIds.length > 1 ? 'each session' : 'this session'}.`
     onLog?.('info', `Debug session MCP server registered for session(s): ${debugSessionIds.join(', ')}`)
 
     return {
