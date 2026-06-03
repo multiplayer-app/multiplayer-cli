@@ -358,9 +358,16 @@ export class RuntimeController extends EventEmitter {
         })
       }
 
-      // When a session recording is attached via the UI, fetch and upload its
-      // full debug context (traces, logs, rrweb, notes) for the agent.
-      if (msg.annotations?.debugSessionId && msg.chat) {
+      // When a session recording is attached via the UI (attach-debug-session API),
+      // fetch and upload its full debug context (traces, logs, rrweb, notes) for the agent.
+      // Skip for user messages and when the message carries inline span context — those
+      // should be analyzed from the attachment payload, not by pulling the whole session.
+      const hasSpanContext =
+        ContextAttachments.getContextAttachmentsByKind(
+          msg.attachments,
+          ContextAttachments.CONTEXT_ATTACHMENT_KIND.DEBUG_SESSION_SPAN
+        ).length > 0
+      if (msg.role !== 'user' && !hasSpanContext && msg.annotations?.debugSessionId && msg.chat) {
         void this.handleAttachedDebugSession(msg.chat, msg.annotations.debugSessionId as string)
       }
     })
@@ -1017,12 +1024,6 @@ export class RuntimeController extends EventEmitter {
       this.emit('session-detail', chatId, { ...detail })
       this.log('info', `Manual chat session registered: ${chatId}`)
 
-      // If the chat was created with a debug session in context, auto-start analysis
-      const debugSessionId = chat.metadata?.debugSession?._id as string | undefined
-      if (debugSessionId && cfg.workspace && cfg.project) {
-        void this.processDebugSessionChat(chatId, debugSessionId)
-      }
-
       // Drain any messages that arrived before the context was ready
       const queued = this.pendingMessages.get(chatId)
       if (queued?.length) {
@@ -1625,63 +1626,6 @@ export class RuntimeController extends EventEmitter {
     }
   }
 
-  private async processDebugSessionChat(chatId: string, debugSessionId: string): Promise<void> {
-    const cfg = this._config
-    if (!cfg.workspace || !cfg.project) return
-
-    this.log('info', `Auto-analyzing debug session ${debugSessionId} in chat ${chatId}`)
-
-    this.radar?.emitAgentChatUpdate({
-      _id: chatId,
-      status: 'streaming',
-      agentName: cfg.name,
-      dir: cfg.dir
-    })
-
-    const { callbacks, state: streamState } = this.makeStreamCallbacks(chatId, () => [cfg.dir ?? ''])
-    const mcpConfig = { apiKey: cfg.apiKey, apiUrl: cfg.url, authType: cfg.authType }
-    const abortController = new AbortController()
-
-    const context = this.chatContexts.get(chatId)
-    if (context) {
-      context.abortController = abortController
-      context.isProcessing = true
-    }
-
-    try {
-      const response = await AiService.startDebugSessionChat(
-        debugSessionId,
-        cfg.dir ?? process.cwd(),
-        mcpConfig,
-        cfg.workspace,
-        cfg.project,
-        cfg.model,
-        cfg.modelKey,
-        cfg.modelUrl,
-        abortController.signal,
-        callbacks
-      )
-
-      const final = normalizeStreamContent(streamState.streamContent || response)
-      if (final && context) context.history.push({ role: 'assistant', content: final })
-
-      this.radar?.emitAgentChatUpdate({
-        _id: chatId,
-        status: 'finished',
-        agentName: cfg.name
-      })
-    } catch (err) {
-      this.log('error', `Debug session chat failed: ${getErrorMessage(err)}`)
-      this.radar?.emitAgentChatUpdate({
-        _id: chatId,
-        status: 'error',
-        agentName: cfg.name
-      })
-    } finally {
-      if (context) context.isProcessing = false
-    }
-  }
-
   /**
    * Called when the UI attaches a session recording to an existing chat.
    * Fetches the full debug context for the session (traces, logs, rrweb, notes),
@@ -1995,6 +1939,13 @@ export class RuntimeController extends EventEmitter {
 
     this.log('info', `User message in ${chatId}: ${content.slice(0, 60)}`)
 
+    const contextAttachmentKinds = (msg.attachments ?? [])
+      .filter((a) => a.type === 'context')
+      .map((a) => String(a.metadata?.kind ?? 'unknown'))
+    if (contextAttachmentKinds.length) {
+      this.log('info', `Context attachments in ${chatId}: ${contextAttachmentKinds.join(', ')}`)
+    }
+
     const cfg = this._config
     const dirs = this.getDirs(chatId)
 
@@ -2033,6 +1984,18 @@ export class RuntimeController extends EventEmitter {
     messageContent = enrichedContent
     if (contextImages?.length) {
       messageImages = [...(messageImages ?? []), ...contextImages]
+    }
+
+    const spanCount = ContextAttachments.getContextAttachmentsByKind(
+      msg.attachments,
+      ContextAttachments.CONTEXT_ATTACHMENT_KIND.DEBUG_SESSION_SPAN
+    ).length
+    if (spanCount > 0) {
+      const inlined = messageContent.includes('Attached Debug Session Span')
+      this.log(
+        'info',
+        `Span attachment(s) in ${chatId}: count=${spanCount}, inlined=${inlined}, mcp=${Boolean(mcpServers)}`
+      )
     }
 
     context.history.push({ role: 'user', content: messageContent, images: messageImages })

@@ -1,5 +1,6 @@
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import type { AgentAttachment, ConversationMessage } from '../types/index.js'
+import { isAnthropicModel } from '../lib/llm/factory.js'
 import { sanitizeCapturedValue, wrapUntrustedObservabilityData } from '../lib/untrustedObservability.js'
 import {
   buildAttachedSessionContextDoc,
@@ -10,10 +11,13 @@ import {
   type McpConfig
 } from './ai.service.js'
 
-/** Matches web-app AgentChat attachment kinds. */
+/** Matches web-app AgentChat attachment kinds (see kinds.ts). */
 export const CONTEXT_ATTACHMENT_KIND = {
+  /** Full session recording — register MCP tools; model fetches traces/logs/notes/rrweb on demand. */
   DEBUG_SESSION: 'debugSession',
+  /** Selected span(s) — inline metadata.data only; no session fetch. */
   DEBUG_SESSION_SPAN: 'debugSessionSpan',
+  /** Playback snapshot — render frame via assets snapshot endpoint. */
   DEBUG_SESSION_SNAPSHOT: 'debugSessionSnapshot'
 } as const
 
@@ -165,6 +169,8 @@ export const buildSpanAttachmentPromptSection = (attachment: AgentAttachment): s
   const body = [
     ...headerLines,
     '',
+    '_Analyze only the span data attached below. Do not fetch or summarize the full debug session unless the user explicitly asks._',
+    '',
     isMulti ? '## Spans Data' : '## Span Data',
     '```json',
     clipJson(sanitizeCapturedValue(payload), MAX_SPAN_JSON_CHARS),
@@ -179,6 +185,7 @@ const appendSpanContextToMessage = (
   attachments: AgentAttachment[] | undefined,
   onLog?: LogFn
 ): string => {
+  // kind: debugSessionSpan → read span payload from metadata.data only
   const spanAttachments = getContextAttachmentsByKind(attachments, CONTEXT_ATTACHMENT_KIND.DEBUG_SESSION_SPAN)
   if (!spanAttachments.length) return content
 
@@ -201,7 +208,7 @@ const buildSnapshotPromptLine = (attachment: AgentAttachment, data: DebugSession
 }
 
 /**
- * Renders snapshot context attachments into prompt text and vision images.
+ * kind: debugSessionSnapshot → fetch screenshot from assets service.
  */
 export const resolveSnapshotAttachments = async (
   messageContent: string,
@@ -279,8 +286,12 @@ export interface EnrichUserMessageResult {
   images?: string[]
 }
 
-const isClaudeModel = (model: string): boolean => model === 'claude-code' || model.startsWith('claude')
+const isClaudeModel = (model: string): boolean => isAnthropicModel(model)
 
+/**
+ * kind: debugSession → Claude: register in-process MCP server (traces/logs/notes/rrweb tools).
+ * Non-Claude: MCP is unavailable; pre-fetch session context into the prompt as fallback.
+ */
 const resolveDebugSessionAttachments = async (params: {
   messageContent: string
   attachments: AgentAttachment[] | undefined
@@ -342,6 +353,7 @@ const resolveDebugSessionAttachments = async (params: {
 export const enrichUserMessageWithContextAttachments = async (
   params: EnrichUserMessageParams
 ): Promise<EnrichUserMessageResult> => {
+  // Strict routing by metadata.kind — each kind uses a different data source.
   let messageContent = appendSpanContextToMessage(params.content, params.attachments, params.onLog)
 
   const snapshotResult = await resolveSnapshotAttachments(messageContent, params.attachments, {
@@ -352,26 +364,26 @@ export const enrichUserMessageWithContextAttachments = async (
   })
   messageContent = snapshotResult.messageContent
 
-  if (params.workspaceId && params.projectId) {
-    const debugSessionResult = await resolveDebugSessionAttachments({
-      messageContent,
-      attachments: params.attachments,
-      workspaceId: params.workspaceId,
-      projectId: params.projectId,
-      model: params.model,
-      mcpConfig: params.mcpConfig,
-      onLog: params.onLog
-    })
-
+  if (!params.workspaceId || !params.projectId) {
     return {
-      messageContent: debugSessionResult.messageContent,
-      mcpServers: debugSessionResult.mcpServers,
+      messageContent,
       images: snapshotResult.images.length ? snapshotResult.images : undefined
     }
   }
 
-  return {
+  const debugSessionResult = await resolveDebugSessionAttachments({
     messageContent,
+    attachments: params.attachments,
+    workspaceId: params.workspaceId,
+    projectId: params.projectId,
+    model: params.model,
+    mcpConfig: params.mcpConfig,
+    onLog: params.onLog
+  })
+
+  return {
+    messageContent: debugSessionResult.messageContent,
+    mcpServers: debugSessionResult.mcpServers,
     images: snapshotResult.images.length ? snapshotResult.images : undefined
   }
 }
