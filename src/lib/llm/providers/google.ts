@@ -344,8 +344,8 @@ export class GoogleAIProvider implements LLMProvider {
       }
       if (lower.includes('access_token_scope_insufficient') || lower.includes('scope_insufficient')) {
         throw new Error(
-          `Gemini CLI OAuth credentials are missing the required scope for the Gemini API.\n` +
-          `Set a GEMINI_API_KEY instead: https://aistudio.google.com/apikey`,
+          'Gemini CLI OAuth credentials are missing the required scope for the Gemini API.\n' +
+          'Set a GEMINI_API_KEY instead: https://aistudio.google.com/apikey',
         )
       }
       if (lower.includes('api_key_invalid') || lower.includes('401') || lower.includes('permission denied') || lower.includes('403')) {

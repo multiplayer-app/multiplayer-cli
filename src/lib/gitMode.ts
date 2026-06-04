@@ -1,4 +1,26 @@
 import type { GitSettings } from '../cli/profile.js'
+import type { AgentConfig } from '../types/index.js'
+
+export interface ResolvedGitPolicy {
+  noGitBranch: boolean
+  branchCreate: boolean
+  commit: boolean
+  push: boolean
+  prCreate: boolean
+}
+
+/** Single source of truth for git toggles (matches runtime `!== false` convention). */
+export function resolveGitPolicy(cfg: AgentConfig): ResolvedGitPolicy {
+  const git = cfg.git
+  const eff = (k: keyof GitSettings) => git?.[k] !== false
+  return {
+    noGitBranch: Boolean(cfg.noGitBranch || git?.use_worktree === false),
+    branchCreate: eff('branch_create'),
+    commit: eff('commit'),
+    push: eff('push'),
+    prCreate: eff('pr_create'),
+  }
+}
 
 export type GitMode = 'dry-run' | 'local-commit' | 'full-pr'
 
@@ -28,7 +50,8 @@ export function detectGitMode(git: GitSettings): GitMode | null {
       eff('commit') === preset.commit &&
       eff('push') === preset.push &&
       eff('pr_create') === preset.pr_create
-    ) return opt.mode
+    )
+      return opt.mode
   }
   return null
 }

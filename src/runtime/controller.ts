@@ -2,6 +2,7 @@ import { EventEmitter } from 'events'
 import mongoose from 'mongoose'
 import {
   AgentConfig,
+  AgentSessionMode,
   Issue,
   AgentMessage,
   AgentToolCall,
@@ -11,6 +12,7 @@ import {
   ResolveIssuePayload,
   IAgent
 } from '../types/index.js'
+import { resolveGitPolicy } from '../lib/gitMode.js'
 import { createRadarService, RadarService } from '../services/radar.service.js'
 import { createApiService } from '../services/api.service.js'
 import { AuthError, isAuthErrorMessage } from '../lib/authError.js'
@@ -39,16 +41,29 @@ interface ChatContext {
   chatId: string
   issue?: Issue
   componentHash?: string
+  mode: AgentSessionMode
   history: ConversationMessage[]
   abortController: AbortController | null
   isProcessing: boolean
   worktreeDir?: string
+  branchName?: string
+  workspaceReady?: boolean
   resolvedCounted?: boolean
 }
 
 const getErrorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 const generateMessageId = (): string => new mongoose.Types.ObjectId().toString()
+
+/** Server-default titles for manual chats that we should replace once we have content. */
+const PLACEHOLDER_TITLES = new Set(['', 'untitled', 'chat', 'new chat'])
+
+/** Derive a short, single-line session title from the first user message. */
+const deriveSessionTitle = (content: string, maxLen = 60): string => {
+  const firstLine = content.replace(/\s+/g, ' ').trim()
+  if (!firstLine) return ''
+  return firstLine.length > maxLen ? `${firstLine.slice(0, maxLen - 1).trimEnd()}…` : firstLine
+}
 
 /** Map backend chat status → TUI session status. */
 const CHAT_STATUS_TO_SESSION: Partial<Record<string, SessionStatus>> = {
@@ -62,6 +77,9 @@ const CHAT_STATUS_TO_SESSION: Partial<Record<string, SessionStatus>> = {
 
 const toSessionStatus = (chatStatus: string | undefined): SessionStatus =>
   CHAT_STATUS_TO_SESSION[chatStatus ?? ''] ?? 'pending'
+
+/** Local session statuses where issue-linked chats use interactive (user Q&A) mode. */
+const TERMINAL_SESSION_STATUSES = new Set<SessionStatus>(['done', 'aborted', 'failed'])
 
 /** How long a tool confirmation may wait before timing out (ms). */
 const CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1000
@@ -496,7 +514,12 @@ export class RuntimeController extends EventEmitter {
 
     this.log('info', `Sending user message to ${chatId}: ${content.slice(0, 80)}`)
     this.emit('chat-status', chatId, 'processing')
-    this.updateSession({ chatId, status: 'analyzing' })
+    // Keep terminal status (done/aborted/failed) so resolveSessionMode stays interactive
+    // for issue follow-ups; UI still shows processing via chat-status above.
+    const current = this._state.sessions.find((s) => s.chatId === chatId)
+    if (!current || !TERMINAL_SESSION_STATUSES.has(current.status)) {
+      this.updateSession({ chatId, status: 'analyzing' })
+    }
 
     // Subscribe to chat events so we receive chat:update and message:new
     this.radar.subscribeChat(chatId)
@@ -606,6 +629,7 @@ export class RuntimeController extends EventEmitter {
           this.chatContexts.set(chatId, {
             chatId,
             componentHash,
+            mode: componentHash ? 'issue_fix' : 'interactive',
             history: [],
             abortController: null,
             isProcessing: false
@@ -873,13 +897,13 @@ export class RuntimeController extends EventEmitter {
         toolCallsMap.clear()
         const verb = randomThinkingVerb()
         const thinkingMsgId = generateMessageId()
-        radar?.emitAgentMessage({
-          _id: thinkingMsgId,
-          chat: chatId,
-          role: 'reasoning',
-          content: `${verb}...`,
-          agentName: cfg.name
-        })
+        // radar?.emitAgentMessage({
+        //   _id: thinkingMsgId,
+        //   chat: chatId,
+        //   role: 'reasoning',
+        //   content: `${verb}...`,
+        //   agentName: cfg.name
+        // })
         this.addSessionMessage(chatId, { id: thinkingMsgId, role: 'reasoning', content: `${verb}...` })
       },
 
@@ -1001,12 +1025,29 @@ export class RuntimeController extends EventEmitter {
   ): Promise<void> {
     // Manual chats (no issue) skip issue fetch, context doc, and worktree restore
     if (!componentHash) {
-      this.chatContexts.set(chatId, {
+      // The client re-fires session-start whenever the user sends a message. Unlike
+      // issue chats (which re-hydrate messages/history from the API below), manual
+      // chats keep all their state locally — so re-initializing here would wipe the
+      // accumulated UI message list and LLM history. Bail out if already restored.
+      if (this.chatContexts.has(chatId) && this.sessionDetails.has(chatId)) {
+        return
+      }
+      const manualContext: ChatContext = {
         chatId,
+        mode: 'interactive',
         history: [],
         abortController: new AbortController(),
-        isProcessing: false
-      })
+        isProcessing: false,
+        branchName: chat.git?.branchName
+      }
+      this.chatContexts.set(chatId, manualContext)
+
+      if (chat.git?.branchName) {
+        await this.ensureChatGitWorkspace(chatId, manualContext, {
+          title: chat.title ?? 'Chat',
+          existingBranchName: chat.git.branchName
+        })
+      }
 
       const summary: SessionSummary = {
         chatId,
@@ -1068,11 +1109,10 @@ export class RuntimeController extends EventEmitter {
         .map(async (m): Promise<ConversationMessage> => {
           if (m.role === 'user' && m.attachments?.length) {
             try {
-              return await ContextAttachments.buildRestoredUserMessage(
-                m.content,
-                m.attachments,
-                contextAttachmentOptions
-              )
+              return await ContextAttachments.buildRestoredUserMessage(m.content, m.attachments, {
+                ...contextAttachmentOptions,
+                sessionMode: 'issue_fix'
+              })
             } catch {
               // Non-fatal — fall back to text-only
             }
@@ -1126,10 +1166,13 @@ export class RuntimeController extends EventEmitter {
     this.chatContexts.set(chatId, {
       chatId,
       issue,
+      mode: 'issue_fix',
       history,
       abortController: new AbortController(),
       isProcessing: false,
-      worktreeDir: restoredWorktreeDir
+      worktreeDir: restoredWorktreeDir,
+      branchName: restoredBranchName,
+      workspaceReady: Boolean(restoredWorktreeDir)
     })
 
     const tuiStatus = toSessionStatus(chat.status)
@@ -1382,7 +1425,7 @@ export class RuntimeController extends EventEmitter {
 
     const cfg = this._config
     const issue = enriched.issue
-    const noGitBranch = cfg.noGitBranch || cfg.git?.use_worktree === false
+    const { noGitBranch } = resolveGitPolicy(cfg)
     const branchName = GitService.makeBranchName(issue.componentHash, issue.title)
     const worktreeDir = noGitBranch ? undefined : GitService.makeWorktreeDir(issue.componentHash)
 
@@ -1404,11 +1447,10 @@ export class RuntimeController extends EventEmitter {
         .map(async (m): Promise<ConversationMessage> => {
           if (m.role === 'user' && m.attachments?.length) {
             try {
-              return await ContextAttachments.buildRestoredUserMessage(
-                m.content,
-                m.attachments,
-                contextAttachmentOptions
-              )
+              return await ContextAttachments.buildRestoredUserMessage(m.content, m.attachments, {
+                ...contextAttachmentOptions,
+                sessionMode: 'issue_fix'
+              })
             } catch {
               // Non-fatal — fall back to text-only
             }
@@ -1425,6 +1467,7 @@ export class RuntimeController extends EventEmitter {
         this.chatContexts.set(chatId, {
           chatId,
           issue,
+          mode: 'issue_fix',
           history,
           abortController: new AbortController(),
           isProcessing: false
@@ -1455,6 +1498,7 @@ export class RuntimeController extends EventEmitter {
     const context: ChatContext = {
       chatId,
       issue,
+      mode: 'issue_fix',
       history,
       abortController,
       isProcessing: true
@@ -1614,6 +1658,9 @@ export class RuntimeController extends EventEmitter {
           this.log('error', `Failed to remove worktree ${context.worktreeDir}: ${getErrorMessage(err)}`)
         }
         context.worktreeDir = undefined
+        // Workspace is gone; let the next interactive follow-up reattach to the
+        // branch via ensureChatGitWorkspace instead of running in the main repo.
+        context.workspaceReady = false
       }
 
       if ((this.quitMode as QuitMode | null) === 'after-current') {
@@ -1774,6 +1821,123 @@ export class RuntimeController extends EventEmitter {
     }
   }
 
+  private resolveSessionMode(chatId: string, context: ChatContext): AgentSessionMode {
+    if (!context.issue) return 'interactive'
+    const session = this._state.sessions.find((s) => s.chatId === chatId)
+    if (session && TERMINAL_SESSION_STATUSES.has(session.status)) {
+      return 'interactive'
+    }
+    return 'issue_fix'
+  }
+
+  private getAgentWorkingDir(chatId: string): string {
+    return this.chatContexts.get(chatId)?.worktreeDir ?? this._config.dir
+  }
+
+  /**
+   * Ensures an isolated git worktree when enabled, or records dry-run / current-branch mode.
+   * Idempotent when `context.worktreeDir` is already set.
+   */
+  private resolveChatBranchName(
+    chatId: string,
+    context: ChatContext,
+    opts: { title: string; existingBranchName?: string }
+  ): string | undefined {
+    if (opts.existingBranchName) return opts.existingBranchName
+    if (context.branchName) return context.branchName
+    if (context.issue) {
+      return GitService.makeBranchName(context.issue.componentHash, context.issue.title)
+    }
+    if (context.componentHash) {
+      const detail = this.sessionDetails.get(chatId)
+      const title = detail?.issueTitle?.replace(/^Solving issue:\s*/i, '').trim() || opts.title
+      return GitService.makeBranchName(context.componentHash, title || 'issue')
+    }
+    // Manual chat (no issue/componentHash): derive a stable per-chat branch so
+    // branch creation works the same as for issues instead of falling back to
+    // "branch creation disabled" on the current branch.
+    return GitService.makeChatBranchName(chatId, opts.title)
+  }
+
+  /** Re-attach worktree path after processIssue cleanup cleared worktreeDir. */
+  private async silentlyRestoreWorktreeDir(context: ChatContext, branchName: string | undefined): Promise<void> {
+    if (context.worktreeDir || !branchName) return
+    const existing = await GitService.getWorktreeForBranch(this._config.dir, branchName)
+    if (existing) {
+      context.worktreeDir = existing
+      this.log('info', `Reattached worktree for branch ${branchName} at ${existing}`)
+    }
+  }
+
+  private async ensureChatGitWorkspace(
+    chatId: string,
+    context: ChatContext,
+    opts: { title: string; existingBranchName?: string; plannedWorktreeDir?: string }
+  ): Promise<void> {
+    const cfg = this._config
+    const policy = resolveGitPolicy(cfg)
+    const branchName =
+      opts.existingBranchName ??
+      context.branchName ??
+      (policy.branchCreate ? this.resolveChatBranchName(chatId, context, opts) : undefined)
+    if (branchName) context.branchName = branchName
+
+    // Already prepared this session (e.g. follow-up after auto-fix cleared worktreeDir only).
+    if (context.workspaceReady) {
+      await this.silentlyRestoreWorktreeDir(context, branchName)
+      return
+    }
+
+    if (context.worktreeDir) {
+      context.workspaceReady = true
+      return
+    }
+
+    if (policy.noGitBranch) {
+      this.log('info', `Chat ${chatId}: dry run — applying changes in project directory`)
+      const msg = 'Dry run: applying patches directly to current branch...'
+      this.emitToRadar(chatId, msg, 'assistant', 'git')
+      this.addSessionMessage(chatId, { role: 'assistant', content: msg, activity: 'git' })
+      context.workspaceReady = true
+      return
+    }
+
+    if (policy.branchCreate && branchName) {
+      try {
+        const existing = await GitService.getWorktreeForBranch(cfg.dir, branchName)
+        if (existing) {
+          // Reattach to the existing worktree silently — re-announcing "Preparing
+          // isolated workspace" on every follow-up turn is misleading and noisy.
+          context.worktreeDir = existing
+          this.log('info', `Reused worktree for branch ${branchName} at ${existing}`)
+        } else {
+          const worktreePath =
+            opts.plannedWorktreeDir ?? GitService.makeWorktreeDir(context.issue?.componentHash ?? chatId)
+          if (opts.existingBranchName || context.componentHash) {
+            context.worktreeDir = await GitService.createWorktreeFromExisting(cfg.dir, worktreePath, branchName)
+          } else {
+            context.worktreeDir = await GitService.createWorktree(cfg.dir, worktreePath, branchName)
+          }
+          const wt = context.worktreeDir!
+          const msg = `Preparing isolated workspace for branch \`${branchName}\` in worktree \`${wt.split('/').pop()}\`...`
+          this.log('info', `Creating git worktree for branch ${branchName}...`)
+          this.emitToRadar(chatId, msg, 'assistant', 'git')
+          this.addSessionMessage(chatId, { role: 'assistant', content: msg, activity: 'git' })
+        }
+        this.updateSession({ chatId, branchName })
+      } catch (err: unknown) {
+        this.log('error', `Failed to ensure worktree for chat ${chatId}: ${getErrorMessage(err)}`)
+      }
+    } else {
+      this.log('info', 'Branch creation disabled — applying patches to current branch')
+      const msg = 'Branch creation disabled — applying patches to current branch...'
+      this.emitToRadar(chatId, msg, 'assistant', 'git')
+      this.addSessionMessage(chatId, { role: 'assistant', content: msg, activity: 'git' })
+    }
+
+    context.workspaceReady = true
+  }
+
   /**
    * Creates an isolated git worktree for the issue branch, or logs a dry-run
    * notice if git branching is disabled.
@@ -1785,27 +1949,18 @@ export class RuntimeController extends EventEmitter {
     worktreeDir: string | undefined,
     noGitBranch: boolean | undefined
   ): Promise<void> {
-    const git = this._config.git
-    if (!noGitBranch) {
-      if (git?.branch_create !== false) {
-        this.log('info', `Creating git worktree for branch ${branchName}...`)
-        const actualWorktreeDir = await GitService.createWorktree(this._config.dir, worktreeDir!, branchName)
-        context.worktreeDir = actualWorktreeDir
-        const msg = `Preparing isolated workspace for branch \`${branchName}\` in worktree \`${actualWorktreeDir.split('/').pop()}\`...`
-        this.emitToRadar(chatId, msg, 'assistant', 'git')
-        this.addSessionMessage(chatId, { role: 'assistant', content: msg, activity: 'git' })
-      } else {
-        this.log('info', 'Branch creation disabled — applying patches to current branch')
-        const msg = 'Branch creation disabled — applying patches to current branch...'
-        this.emitToRadar(chatId, msg, 'assistant', 'git')
-        this.addSessionMessage(chatId, { role: 'assistant', content: msg, activity: 'git' })
-      }
-    } else {
-      this.log('info', 'Dry run: applying patches directly to current branch')
-      const msg = 'Dry run: applying patches directly to current branch...'
-      this.emitToRadar(chatId, msg, 'assistant', 'git')
-      this.addSessionMessage(chatId, { role: 'assistant', content: msg, activity: 'git' })
+    if (noGitBranch) {
+      await this.ensureChatGitWorkspace(chatId, context, {
+        title: context.issue?.title ?? 'chat'
+      })
+      return
     }
+    context.branchName = branchName
+    await this.ensureChatGitWorkspace(chatId, context, {
+      title: context.issue?.title ?? 'chat',
+      existingBranchName: branchName,
+      plannedWorktreeDir: worktreeDir
+    })
   }
 
   /**
@@ -1947,7 +2102,41 @@ export class RuntimeController extends EventEmitter {
     }
 
     const cfg = this._config
-    const dirs = this.getDirs(chatId)
+    const sessionMode = this.resolveSessionMode(chatId, context)
+    context.mode = sessionMode
+    const detail = this.sessionDetails.get(chatId)
+
+    // Manual chats arrive titled "Untitled" from the server (no issue to source a
+    // title from). Derive one from the first user message so the session list is
+    // readable instead of a wall of "Untitled", and persist it back to the server.
+    if (!context.issue && PLACEHOLDER_TITLES.has((detail?.issueTitle ?? '').trim().toLowerCase())) {
+      const derived = deriveSessionTitle(content)
+      if (derived) {
+        this.updateSession({ chatId, issueTitle: derived })
+        if (this.radar && cfg.workspace && cfg.project) {
+          this.radar
+            .updateChat(cfg.workspace, cfg.project, chatId, { title: derived })
+            .catch((err) => this.log('error', `Failed to persist chat title for ${chatId}: ${getErrorMessage(err)}`))
+        }
+      }
+    }
+
+    let existingBranchName = context.branchName ?? detail?.branchName
+    if (!existingBranchName && this.radar && cfg.workspace && cfg.project) {
+      try {
+        const chat = await this.radar.fetchChat(cfg.workspace, cfg.project, chatId)
+        existingBranchName = chat.git?.branchName
+      } catch {
+        // Non-fatal — proceed without stored branch
+      }
+    }
+
+    await this.ensureChatGitWorkspace(chatId, context, {
+      title: detail?.issueTitle ?? 'chat',
+      existingBranchName
+    })
+
+    const projectDir = context.worktreeDir ?? cfg.dir
 
     // Fetch user-uploaded file attachments and embed their content in the message.
     // Only 'file' type attachments carry presigned S3 download URLs; other types
@@ -1979,6 +2168,7 @@ export class RuntimeController extends EventEmitter {
       projectId: cfg.project,
       model: cfg.model,
       mcpConfig,
+      sessionMode,
       onLog: (level, logMessage) => this.log(level, logMessage)
     })
     messageContent = enrichedContent
@@ -2003,26 +2193,27 @@ export class RuntimeController extends EventEmitter {
     const abortController = new AbortController()
     context.abortController = abortController
     context.isProcessing = true
+    const agentDir = this.getAgentWorkingDir(chatId)
     this.radar?.emitAgentChatUpdate({
       _id: chatId,
       contextKey: context.issue?.componentHash ?? context.componentHash ?? '',
       status: 'processing',
       agentName: cfg.name,
-      dir: cfg.dir
+      dir: agentDir
     })
 
-    const { callbacks, state: streamState } = this.makeStreamCallbacks(chatId, () => dirs)
+    const { callbacks, state: streamState } = this.makeStreamCallbacks(chatId, () => this.getDirs(chatId))
 
     try {
       const response = await AiService.continueChat(
         context.history,
-        context.worktreeDir ?? cfg.dir,
+        projectDir,
         cfg.model,
         cfg.modelKey,
         cfg.modelUrl,
         abortController.signal,
         callbacks,
-        mcpServers
+        { sessionMode, isDemoProject: cfg.isDemoProject, mcpServers }
       )
       const final = normalizeStreamContent(streamState.streamContent || response)
       if (final) context.history.push({ role: 'assistant', content: final })
@@ -2032,8 +2223,15 @@ export class RuntimeController extends EventEmitter {
         contextKey: context.issue?.componentHash ?? context.componentHash ?? '',
         status,
         agentName: cfg.name,
-        dir: cfg.dir
+        dir: agentDir
       })
+      if (status === 'finished') {
+        this.updateSession({ chatId, status: 'done' })
+        this.emit('chat-status', chatId, 'finished')
+      } else {
+        this.updateSession({ chatId, status: 'aborted' })
+        this.emit('chat-status', chatId, 'aborted')
+      }
     } catch (err: unknown) {
       const message = AiService.classifyAiError(err)
       this.log('error', `Chat error (${chatId}): ${message}`)
@@ -2048,7 +2246,7 @@ export class RuntimeController extends EventEmitter {
             content: `Error: ${message}`,
             agentName: cfg.name
           },
-          dirs
+          this.getDirs(chatId)
         )
       )
       this.radar?.emitAgentChatUpdate({
@@ -2056,7 +2254,7 @@ export class RuntimeController extends EventEmitter {
         contextKey: context.issue?.componentHash ?? context.componentHash ?? '',
         status: 'error',
         agentName: cfg.name,
-        dir: cfg.dir
+        dir: agentDir
       })
     } finally {
       context.isProcessing = false

@@ -94,6 +94,12 @@ export interface RadarService {
     signal?: AbortSignal
   ) => Promise<void>
   abortChat: (workspaceId: string, projectId: string, chatId: string) => Promise<void>
+  updateChat: (
+    workspaceId: string,
+    projectId: string,
+    chatId: string,
+    payload: { title?: string }
+  ) => Promise<void>
   fetchChat: (workspaceId: string, projectId: string, chatId: string) => Promise<AgentChat>
   subscribeChat: (chatId: string) => void
   unsubscribeChat: (chatId: string) => void
@@ -431,6 +437,18 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
     await fetchRaw(projectUrl(workspaceId, projectId, `/agents/chats/${chatId}/abort`), { method: 'POST' })
   }
 
+  const updateChat = async (
+    workspaceId: string,
+    projectId: string,
+    chatId: string,
+    payload: { title?: string },
+  ): Promise<void> => {
+    await fetchJson(projectUrl(workspaceId, projectId, `/agents/chats/${chatId}`), {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    })
+  }
+
   const fetchChat = async (workspaceId: string, projectId: string, chatId: string): Promise<AgentChat> => {
     return fetchJson<AgentChat>(projectUrl(workspaceId, projectId, `/agents/chats/${chatId}`))
   }
@@ -487,6 +505,7 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
     subscribeChat,
     unsubscribeChat,
     abortChat,
+    updateChat,
     fetchChat,
     fetchAgentChats,
     listComponents,

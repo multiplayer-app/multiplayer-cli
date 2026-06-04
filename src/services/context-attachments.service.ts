@@ -1,5 +1,5 @@
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk'
-import type { AgentAttachment, ConversationMessage } from '../types/index.js'
+import type { AgentAttachment, AgentSessionMode, ConversationMessage } from '../types/index.js'
 import { isAnthropicModel } from '../lib/llm/factory.js'
 import { sanitizeCapturedValue, wrapUntrustedObservabilityData } from '../lib/untrustedObservability.js'
 import {
@@ -8,7 +8,7 @@ import {
   fetchAttachmentContent,
   fetchDebugSessionContext,
   fetchDebugSessionSnapshot,
-  type McpConfig
+  type McpConfig,
 } from './ai.service.js'
 
 /** Matches web-app AgentChat attachment kinds (see kinds.ts). */
@@ -20,7 +20,7 @@ export const CONTEXT_ATTACHMENT_KIND = {
   /** Playback snapshot — render frame via assets snapshot endpoint. */
   DEBUG_SESSION_SNAPSHOT: 'debugSessionSnapshot',
   /** DOM element picked in recording inspector — inline metadata.data only. */
-  DEBUG_SESSION_ELEMENT: 'debugSessionElement'
+  DEBUG_SESSION_ELEMENT: 'debugSessionElement',
 } as const
 
 export type ContextAttachmentKind = (typeof CONTEXT_ATTACHMENT_KIND)[keyof typeof CONTEXT_ATTACHMENT_KIND]
@@ -96,7 +96,7 @@ const getContextKind = (attachment: AgentAttachment): string | undefined => {
 
 export const getContextAttachmentsByKind = (
   attachments: AgentAttachment[] | undefined,
-  kind: ContextAttachmentKind
+  kind: ContextAttachmentKind,
 ): AgentAttachment[] => (attachments ?? []).filter((a) => isContextAttachment(a) && getContextKind(a) === kind)
 
 export const extractDebugSessionIds = (attachments: AgentAttachment[] | undefined): string[] =>
@@ -135,8 +135,8 @@ const getElementData = (attachment: AgentAttachment): DebugSessionElementAttachm
     textContent: typeof data?.textContent === 'string' ? data.textContent : undefined,
     attributes: Array.isArray(data?.attributes)
       ? (data.attributes as Array<{ name?: string; value?: string }>)
-          .filter((a) => typeof a?.name === 'string')
-          .map((a) => ({ name: a.name as string, value: String(a.value ?? '') }))
+        .filter((a) => typeof a?.name === 'string')
+        .map((a) => ({ name: a.name as string, value: String(a.value ?? '') }))
       : undefined,
     computedStyles:
       data?.computedStyles && typeof data.computedStyles === 'object' && !Array.isArray(data.computedStyles)
@@ -147,7 +147,7 @@ const getElementData = (attachment: AgentAttachment): DebugSessionElementAttachm
         ? (data.rect as DebugSessionElementAttachmentData['rect'])
         : undefined,
     path: Array.isArray(data?.path) ? (data.path as ElementPathItem[]) : undefined,
-    message: typeof data?.message === 'string' ? data.message : undefined
+    message: typeof data?.message === 'string' ? data.message : undefined,
   }
 }
 
@@ -164,12 +164,12 @@ const getSnapshotData = (attachment: AgentAttachment): DebugSessionSnapshotAttac
     debugSessionName: typeof data?.debugSessionName === 'string' ? data.debugSessionName : undefined,
     debugSessionUrl: typeof data?.debugSessionUrl === 'string' ? data.debugSessionUrl : undefined,
     timestampMs: Math.floor(timestampMs),
-    relativeTime: typeof data?.relativeTime === 'string' ? data.relativeTime : undefined
+    relativeTime: typeof data?.relativeTime === 'string' ? data.relativeTime : undefined,
   }
 }
 
 const getSpanEntries = (
-  data: DebugSessionSpanAttachmentData | undefined
+  data: DebugSessionSpanAttachmentData | undefined,
 ): NonNullable<DebugSessionSpanAttachmentData['spans']> => {
   if (!data) return []
 
@@ -183,8 +183,8 @@ const getSpanEntries = (
         nodeId: data.nodeId,
         spanId: data.spanId,
         traceId: data.traceId,
-        span: data.span
-      }
+        span: data.span,
+      },
     ]
   }
 
@@ -207,7 +207,7 @@ export const buildSpanAttachmentPromptSection = (attachment: AgentAttachment): s
     isMulti
       ? `# Attached Debug Session Spans (${spanEntries.length}): ${attachment.name}`
       : `# Attached Debug Session Span: ${attachment.name}`,
-    ''
+    '',
   ]
 
   if (data?.debugSessionId) headerLines.push(`**Session ID:** \`${data.debugSessionId}\``)
@@ -231,8 +231,8 @@ export const buildSpanAttachmentPromptSection = (attachment: AgentAttachment): s
       nodeId,
       spanId,
       traceId,
-      span
-    }))
+      span,
+    })),
   }
 
   const body = [
@@ -243,7 +243,7 @@ export const buildSpanAttachmentPromptSection = (attachment: AgentAttachment): s
     isMulti ? '## Spans Data' : '## Span Data',
     '```json',
     clipJson(sanitizeCapturedValue(payload), MAX_SPAN_JSON_CHARS),
-    '```'
+    '```',
   ].join('\n')
 
   return ['## Context Attachment: debug session span', wrapUntrustedObservabilityData(body)].join('\n\n')
@@ -284,7 +284,7 @@ export const buildElementAttachmentPromptSection = (attachment: AgentAttachment)
     '## Element Data',
     '```json',
     clipJson(sanitizeCapturedValue(data), MAX_SPAN_JSON_CHARS),
-    '```'
+    '```',
   ].join('\n')
 
   return ['## Context Attachment: debug session element', wrapUntrustedObservabilityData(body)].join('\n\n')
@@ -293,7 +293,7 @@ export const buildElementAttachmentPromptSection = (attachment: AgentAttachment)
 const appendElementContextToMessage = (
   content: string,
   attachments: AgentAttachment[] | undefined,
-  onLog?: LogFn
+  onLog?: LogFn,
 ): string => {
   const elementAttachments = getContextAttachmentsByKind(attachments, CONTEXT_ATTACHMENT_KIND.DEBUG_SESSION_ELEMENT)
   if (!elementAttachments.length) return content
@@ -310,7 +310,7 @@ const appendElementContextToMessage = (
 const appendSpanContextToMessage = (
   content: string,
   attachments: AgentAttachment[] | undefined,
-  onLog?: LogFn
+  onLog?: LogFn,
 ): string => {
   // kind: debugSessionSpan → read span payload from metadata.data only
   const spanAttachments = getContextAttachmentsByKind(attachments, CONTEXT_ATTACHMENT_KIND.DEBUG_SESSION_SPAN)
@@ -321,7 +321,7 @@ const appendSpanContextToMessage = (
     const spanCount = getSpanEntries(attachment.metadata?.data as DebugSessionSpanAttachmentData | undefined).length
     onLog?.(
       'info',
-      `Inlining debug session span attachment "${attachment.name}" (${spanCount} span${spanCount === 1 ? '' : 's'})`
+      `Inlining debug session span attachment "${attachment.name}" (${spanCount} span${spanCount === 1 ? '' : 's'})`,
     )
     const section = buildSpanAttachmentPromptSection(attachment)
     if (section) messageContent = `${messageContent}\n\n${section}`
@@ -340,7 +340,7 @@ const buildSnapshotPromptLine = (attachment: AgentAttachment, data: DebugSession
 export const resolveSnapshotAttachments = async (
   messageContent: string,
   attachments: AgentAttachment[] | undefined,
-  options: ContextAttachmentResolutionOptions
+  options: ContextAttachmentResolutionOptions,
 ): Promise<{ messageContent: string; images: string[] }> => {
   const snapshotAttachments = getContextAttachmentsByKind(attachments, CONTEXT_ATTACHMENT_KIND.DEBUG_SESSION_SNAPSHOT)
   if (!snapshotAttachments.length) {
@@ -365,7 +365,7 @@ export const resolveSnapshotAttachments = async (
 
     onLog?.(
       'info',
-      `Rendering session snapshot for ${data.debugSessionId} @ ${data.timestampMs}ms (${attachment.name})`
+      `Rendering session snapshot for ${data.debugSessionId} @ ${data.timestampMs}ms (${attachment.name})`,
     )
 
     nextContent = `${nextContent}\n\n${buildSnapshotPromptLine(attachment, data)}`
@@ -376,7 +376,7 @@ export const resolveSnapshotAttachments = async (
         data.timestampMs,
         workspaceId,
         projectId,
-        mcpConfig
+        mcpConfig,
       )
 
       if (image) {
@@ -388,7 +388,7 @@ export const resolveSnapshotAttachments = async (
     } catch (err) {
       onLog?.(
         'error',
-        `Failed to render snapshot for ${data.debugSessionId} @ ${data.timestampMs}ms: ${err instanceof Error ? err.message : String(err)}`
+        `Failed to render snapshot for ${data.debugSessionId} @ ${data.timestampMs}ms: ${err instanceof Error ? err.message : String(err)}`,
       )
       nextContent = `${nextContent}\n_(Snapshot image could not be generated.)_`
     }
@@ -404,6 +404,7 @@ export interface EnrichUserMessageParams {
   projectId?: string
   model: string
   mcpConfig: McpConfig
+  sessionMode?: AgentSessionMode
   onLog?: LogFn
 }
 
@@ -426,6 +427,7 @@ const resolveDebugSessionAttachments = async (params: {
   projectId: string
   model: string
   mcpConfig: McpConfig
+  sessionMode?: AgentSessionMode
   onLog?: LogFn
 }): Promise<EnrichUserMessageResult> => {
   const { attachments, workspaceId, projectId, model, mcpConfig, onLog } = params
@@ -438,14 +440,17 @@ const resolveDebugSessionAttachments = async (params: {
 
   if (isClaudeModel(model)) {
     const idList = debugSessionIds.map((id) => `\`${id}\``).join(', ')
-    messageContent = `${messageContent}\n\n> Debug session${debugSessionIds.length > 1 ? 's' : ''} attached: ${idList}. Use the \`get_debug_session_traces\`, \`get_debug_session_logs\`, \`get_debug_session_notes\`, and \`get_debug_session_rrweb_timeline\` tools to investigate ${debugSessionIds.length > 1 ? 'each session' : 'this session'}.`
+    const interactiveHint = 'Answer the user\'s question using this recording. Do not modify code unless they ask.'
+    const fixHint = `Use the \`get_debug_session_traces\`, \`get_debug_session_logs\`, \`get_debug_session_notes\`, and \`get_debug_session_rrweb_timeline\` tools to investigate ${debugSessionIds.length > 1 ? 'each session' : 'this session'}.`
+    const actionHint = params.sessionMode === 'issue_fix' ? fixHint : interactiveHint
+    messageContent = `${messageContent}\n\n> Debug session${debugSessionIds.length > 1 ? 's' : ''} attached: ${idList}. ${actionHint}`
     onLog?.('info', `Debug session MCP server registered for session(s): ${debugSessionIds.join(', ')}`)
 
     return {
       messageContent,
       mcpServers: {
-        'multiplayer-debug-sessions': buildDebugSessionMcpServer(mcpConfig, workspaceId, projectId)
-      }
+        'multiplayer-debug-sessions': buildDebugSessionMcpServer(mcpConfig, workspaceId, projectId),
+      },
     }
   }
 
@@ -469,7 +474,7 @@ const resolveDebugSessionAttachments = async (params: {
     } catch (err) {
       onLog?.(
         'error',
-        `Failed to pre-fetch debug session context for ${debugSessionId}: ${err instanceof Error ? err.message : String(err)}`
+        `Failed to pre-fetch debug session context for ${debugSessionId}: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
   }
@@ -478,7 +483,7 @@ const resolveDebugSessionAttachments = async (params: {
 }
 
 export const enrichUserMessageWithContextAttachments = async (
-  params: EnrichUserMessageParams
+  params: EnrichUserMessageParams,
 ): Promise<EnrichUserMessageResult> => {
   // Strict routing by metadata.kind — each kind uses a different data source.
   let messageContent = appendSpanContextToMessage(params.content, params.attachments, params.onLog)
@@ -488,14 +493,14 @@ export const enrichUserMessageWithContextAttachments = async (
     workspaceId: params.workspaceId,
     projectId: params.projectId,
     mcpConfig: params.mcpConfig,
-    onLog: params.onLog
+    onLog: params.onLog,
   })
   messageContent = snapshotResult.messageContent
 
   if (!params.workspaceId || !params.projectId) {
     return {
       messageContent,
-      images: snapshotResult.images.length ? snapshotResult.images : undefined
+      images: snapshotResult.images.length ? snapshotResult.images : undefined,
     }
   }
 
@@ -506,20 +511,21 @@ export const enrichUserMessageWithContextAttachments = async (
     projectId: params.projectId,
     model: params.model,
     mcpConfig: params.mcpConfig,
-    onLog: params.onLog
+    sessionMode: params.sessionMode ?? 'interactive',
+    onLog: params.onLog,
   })
 
   return {
     messageContent: debugSessionResult.messageContent,
     mcpServers: debugSessionResult.mcpServers,
-    images: snapshotResult.images.length ? snapshotResult.images : undefined
+    images: snapshotResult.images.length ? snapshotResult.images : undefined,
   }
 }
 
 export const buildRestoredUserMessage = async (
   content: string,
   attachments: AgentAttachment[] | undefined,
-  options?: ContextAttachmentResolutionOptions
+  options?: ContextAttachmentResolutionOptions & { sessionMode?: AgentSessionMode },
 ): Promise<ConversationMessage> => {
   const fileAttachments = (attachments ?? []).filter((a) => a.type === 'file')
   let messageContent = content
@@ -527,7 +533,7 @@ export const buildRestoredUserMessage = async (
 
   if (fileAttachments.length) {
     const fileContent = await fetchAttachmentContent(
-      fileAttachments.map((a) => ({ name: a.name, url: a.url, mimeType: a.mimeType }))
+      fileAttachments.map((a) => ({ name: a.name, url: a.url, mimeType: a.mimeType })),
     )
     if (fileContent.textBlocks.length) {
       messageContent = `${messageContent}\n\n${fileContent.textBlocks.join('\n\n')}`

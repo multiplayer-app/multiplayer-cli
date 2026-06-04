@@ -1,3 +1,6 @@
+/** How the agent should behave for user-driven chat turns (not automated resolveIssue). */
+export type AgentSessionMode = 'interactive' | 'issue_fix'
+
 export interface AgentConfig {
   url: string
   apiKey: string
