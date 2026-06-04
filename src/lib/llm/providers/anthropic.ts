@@ -292,10 +292,7 @@ export class AnthropicProvider implements LLMProvider {
             state,
             (text) => { finalText += text },
           )
-        } else if (msg.type === 'tool_progress') {
-          const elapsed = (msg.elapsed_time_seconds as number).toFixed(1)
-          yield { type: 'progress', message: `[${msg.tool_name}] ${elapsed}s…` }
-        } else if (msg.type === 'system' && msg.subtype === 'task_progress') {
+        } else if (isFixFlow && msg.type === 'system' && msg.subtype === 'task_progress') {
           yield { type: 'progress', message: msg.description as string }
         } else if (msg.type === 'result' && msg.subtype !== 'success') {
           const errors = (msg.errors as string[] | undefined) ?? []

@@ -179,6 +179,9 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
   const [apiUrl, setApiUrl] = useState(config.modelUrl ?? '')
   const [customModelName, setCustomModelName] = useState('')
 
+  // ── Gemini auth (env var only) ────────────────────────────────────────────
+  const [geminiCliAuth, setGeminiCliAuth] = useState<{ source: 'env'; key: string } | null>(null)
+
   // ── Feedback ──────────────────────────────────────────────────────────────
   const [apiKeyError, setApiKeyError] = useState<string | null>(null)
   const [customModelError, setCustomModelError] = useState<string | null>(null)
@@ -266,6 +269,25 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
       return
     }
 
+    if (provider.id === 'gemini') {
+      // Check GEMINI_API_KEY env var before asking the user.
+      const detected = AiService.detectGeminiCliAuth()
+      if (detected && !config.modelKey) {
+        setGeminiCliAuth(detected)
+        setApiKey(detected.key)
+      }
+
+      const fetchKey = config.modelKey || detected?.key || ''
+      if (fetchKey) {
+        void fetchAndShowModels(provider, fetchKey)
+      } else {
+        setModelList(provider.fallbackModels)
+        setModelIndex(0)
+        setSubStep('model')
+      }
+      return
+    }
+
     const savedKey = config.modelKey ?? ''
     if (savedKey) {
       // Have a saved key — fetch live models straight away
@@ -298,7 +320,7 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
       return
     }
 
-    // No API key yet — collect it before completing
+    // No API key yet — collect it
     if (!effectiveKey) {
       setSubStep('api-key')
       return
@@ -376,7 +398,7 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
     const provider = selectedProvider!
     const effectiveKey = apiKey || config.modelKey || ''
 
-    // No key yet — collect it before completing
+    // No key yet — collect it
     if (!effectiveKey && provider.id !== 'custom') {
       setSubStep('api-key')
       return
@@ -535,6 +557,11 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
         <text attributes={tuiAttrs({ dim: true })}>
           Enter your <span fg={provider.iconColor}>{provider.label}</span> API key:
         </text>
+        {provider.id === 'gemini' && (
+          <text attributes={tuiAttrs({ dim: true })}>
+            Get one at <span fg='#34d399'>https://aistudio.google.com/apikey</span>
+          </text>
+        )}
         {apiKeyError && <text fg='#ef4444'>✗ {apiKeyError}</text>}
         {validating ? (
           <text fg='#f59e0b'>◌ Validating key…</text>
@@ -578,7 +605,12 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
         <text attributes={tuiAttrs({ dim: true })} marginLeft={1} flexShrink={0}>
           <span fg={provider.iconColor}>{provider.icon} {provider.label}</span> — select a model:
         </text>
-        {!hasKey && (
+        {provider.id === 'gemini' && geminiCliAuth?.source === 'env' && (
+          <text fg='#10b981' marginLeft={1} flexShrink={0}>
+            ✓ GEMINI_API_KEY detected
+          </text>
+        )}
+        {!hasKey && !(provider.id === 'gemini' && geminiCliAuth) && (
           <text fg='#f59e0b' marginLeft={1} flexShrink={0}>
             ◌ Showing defaults — API key requested on selection
           </text>

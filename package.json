@@ -61,8 +61,12 @@
     "simple-git": "3.33.0",
     "socket.io-client": "4.8.3",
     "superagent": "10.3.0",
-    "typescript": "6.0.2",
     "turbo": "2.9.14",
+    "typescript": "6.0.2",
     "zod": "^4.3.6"
+  },
+  "dependencies": {
+    "@google/genai": "^2.7.0",
+    "google-auth-library": "^10.6.2"
   }
 }

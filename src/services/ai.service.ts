@@ -191,6 +191,24 @@ export const fetchAnthropicModels = async (modelKey?: string): Promise<string[]>
   }
 }
 
+// ─── Gemini auth detection ────────────────────────────────────────────────────
+
+/**
+ * Detects a GEMINI_API_KEY from the environment so the UI can pre-fill it.
+ * Returns null when the env var is absent.
+ */
+export const detectGeminiCliAuth = (): { source: 'env'; key: string } | null => {
+  const envKey = process.env.GEMINI_API_KEY?.trim()
+  if (envKey) return { source: 'env', key: envKey }
+  return null
+}
+
+export const checkGeminiRequirements = async (apiKey: string, model: string): Promise<void> => {
+  const { GoogleAIProvider } = await import('../lib/llm/providers/google.js')
+  const provider = new GoogleAIProvider({ model, apiKey })
+  await provider.validateCredentials()
+}
+
 export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string, model?: string): Promise<void> => {
   if (!apiKey) {
     throw new Error('AI API key is required for OpenAI-compatible models')
@@ -386,31 +404,25 @@ export interface SessionSketch {
   title?: string
 }
 
-/** Build a human-readable timeline string from rrweb events. */
-const buildRrwebTimeline = (events: any[]): string => {
+/**
+ * Extract browser console log entries from rrweb events.
+ * Only captures type-3 IncrementalSnapshot events with source 14 (Console).
+ * Navigation and input events are intentionally excluded to keep context concise.
+ */
+const extractRrwebConsoleLogs = (events: any[]): string => {
   const lines: string[] = []
   const startTime = events[0]?.timestamp ?? 0
   for (const event of events) {
+    // type 3 = IncrementalSnapshot, source 14 = Console
+    if (event.type !== 3 || event.data?.source !== 14) continue
     const relMs = event.timestamp - startTime
     const relSec = (relMs / 1000).toFixed(1)
-    // type 4 = Meta (page navigation)
-    if (event.type === 4) {
-      const href = event.data?.href ?? ''
-      if (href) lines.push(`[${relSec}s] Navigation: ${href}`)
-    }
-    // type 3 = IncrementalSnapshot; source 5 = Input, source 14 = Console
-    if (event.type === 3) {
-      if (event.data?.source === 5) {
-        const text = event.data?.text ?? ''
-        if (text) lines.push(`[${relSec}s] Input: ${String(text).slice(0, 120)}`)
-      }
-      if (event.data?.source === 14) {
-        const payload = event.data?.payload
-        const level = payload?.level ?? 'log'
-        const trace = Array.isArray(payload?.trace) ? payload.trace.join(' ') : String(payload?.trace ?? '')
-        if (trace) lines.push(`[${relSec}s] Console.${level}: ${trace.slice(0, 200)}`)
-      }
-    }
+    const payload = event.data?.payload
+    const level = (payload?.level ?? 'log') as string
+    const trace = Array.isArray(payload?.trace)
+      ? (payload.trace as unknown[]).join(' ')
+      : String(payload?.trace ?? '')
+    if (trace) lines.push(`[${relSec}s] ${level.toUpperCase()}: ${trace.slice(0, 300)}`)
   }
   return lines.join('\n')
 }
@@ -566,12 +578,12 @@ export const fetchDebugSessionContext = async (
       : null
 
     const rrwebEvents: unknown[] = Array.isArray(rawRrweb) ? rawRrweb : (rawRrweb?.data ?? [])
-    const rrwebTimeline = buildRrwebTimeline(rrwebEvents)
+    const rrwebConsoleLogs = extractRrwebConsoleLogs(rrwebEvents)
     const sessionNotes = notesData?.notes ?? []
     const sessionSketches: SessionSketch[] = (notesData?.sketches ?? []) as SessionSketch[]
 
     return {
-      context: JSON.stringify({ sessionId: debugSessionId, traces, logs, sessionNotes, rrwebTimeline }),
+      context: JSON.stringify({ sessionId: debugSessionId, traces, logs, sessionNotes, rrwebConsoleLogs }),
       sessionSketches,
     }
   } catch {
@@ -623,7 +635,7 @@ export const fetchDebugSessionSnapshot = async (
  */
 export const buildAttachedSessionContextDoc = (debugSessionId: string, debugContext: string): string => {
   let parsedCtx:
-    | { sessionId?: string; traces?: any[]; logs?: any[]; sessionNotes?: any[]; rrwebTimeline?: string }
+    | { sessionId?: string; traces?: any[]; logs?: any[]; sessionNotes?: any[]; rrwebConsoleLogs?: string }
     | undefined
   if (debugContext) {
     try {
@@ -649,9 +661,9 @@ export const buildAttachedSessionContextDoc = (debugSessionId: string, debugCont
       }
     }
 
-    if (parsedCtx.rrwebTimeline) {
-      capturedLines.push('', '### User Session Replay')
-      capturedLines.push(parsedCtx.rrwebTimeline)
+    if (parsedCtx.rrwebConsoleLogs) {
+      capturedLines.push('', '### Browser Console Logs (from session recording)')
+      capturedLines.push(parsedCtx.rrwebConsoleLogs)
     }
 
     if (Array.isArray(parsedCtx.logs) && parsedCtx.logs.length > 0) {

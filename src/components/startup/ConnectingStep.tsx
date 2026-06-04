@@ -173,6 +173,8 @@ export function ConnectingStep({ config, onComplete, onBack }: Props): ReactElem
           const isClaudeModel = config.model === 'claude-code' || config.model.startsWith('claude')
           if (isClaudeModel) {
             await AiService.checkClaudeRequirements(config.model)
+          } else if (AiService.isGeminiModel(config.model)) {
+            await AiService.checkGeminiRequirements(config.modelKey, config.model)
           } else {
             await AiService.checkOpenAiRequirements(config.modelKey, config.modelUrl, config.model)
           }

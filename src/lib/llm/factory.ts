@@ -9,6 +9,7 @@
 import type { LLMProvider } from './types.js'
 import { AnthropicProvider } from './providers/anthropic.js'
 import { OpenAICompatibleProvider } from './providers/openai.js'
+import { GoogleAIProvider } from './providers/google.js'
 
 // ─── Model classification ─────────────────────────────────────────────────────
 
@@ -20,7 +21,7 @@ import { OpenAICompatibleProvider } from './providers/openai.js'
 export const isAnthropicModel = (model: string): boolean =>
   model === 'claude-code' || model.startsWith('claude')
 
-/** True for Gemini models that use Google's OpenAI-compatible gateway. */
+/** True for Gemini models routed through GoogleAIProvider. */
 export const isGeminiModel = (model: string): boolean => model.startsWith('gemini')
 
 /** True for OpenAI Codex models. */
@@ -29,15 +30,12 @@ export const isCodexModel = (model: string): boolean => model.startsWith('codex'
 // ─── Default base URLs ────────────────────────────────────────────────────────
 
 /**
- * Returns the canonical base URL for a provider that requires a non-standard endpoint,
- * when no explicit `modelUrl` has been configured.
- *
- * Currently only Gemini needs this — it uses Google's OpenAI-compatible gateway.
- * OpenAI and Codex use the standard OpenAI endpoint by default.
- * OpenRouter users configure their URL explicitly via `modelUrl`.
+ * Returns the canonical base URL for OpenAI-compatible providers that need a
+ * non-standard endpoint. Gemini now uses GoogleAIProvider (native SDK) so it
+ * no longer needs an OpenAI-compatible base URL.
  */
 export const getProviderDefaultBaseUrl = (model: string): string | undefined => {
-  if (isGeminiModel(model)) return 'https://generativelanguage.googleapis.com/v1beta/openai/'
+  void model
   return undefined
 }
 
@@ -56,15 +54,21 @@ export interface ProviderConfig {
  *
  * Routing:
  *   - claude-code, claude-*  →  AnthropicProvider (Claude Code SDK subprocess)
- *   - gemini-*               →  OpenAICompatibleProvider (Google's OpenAI gateway)
+ *   - gemini-*               →  GoogleAIProvider  (native @google/genai SDK, supports OAuth)
  *   - codex-*, gpt-*         →  OpenAICompatibleProvider (OpenAI endpoint)
  *   - anything else          →  OpenAICompatibleProvider (custom / OpenRouter endpoint)
  */
 export function createProvider(config: ProviderConfig): LLMProvider {
   if (isAnthropicModel(config.model)) {
     return new AnthropicProvider({
-      // 'claude-code' means "let Claude Code pick the model" — pass undefined.
       model: config.model === 'claude-code' ? undefined : config.model,
+    })
+  }
+
+  if (isGeminiModel(config.model)) {
+    return new GoogleAIProvider({
+      model: config.model,
+      apiKey: config.apiKey,
     })
   }
 
