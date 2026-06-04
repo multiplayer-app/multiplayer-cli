@@ -98,7 +98,7 @@ export interface RadarService {
     workspaceId: string,
     projectId: string,
     chatId: string,
-    payload: { title?: string }
+    payload: { title?: string; git?: { branchName?: string } }
   ) => Promise<void>
   fetchChat: (workspaceId: string, projectId: string, chatId: string) => Promise<AgentChat>
   subscribeChat: (chatId: string) => void
@@ -441,7 +441,7 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
     workspaceId: string,
     projectId: string,
     chatId: string,
-    payload: { title?: string },
+    payload: { title?: string; git?: { branchName?: string } },
   ): Promise<void> => {
     await fetchJson(projectUrl(workspaceId, projectId, `/agents/chats/${chatId}`), {
       method: 'PATCH',

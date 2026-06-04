@@ -49,6 +49,13 @@ interface ChatContext {
   branchName?: string
   workspaceReady?: boolean
   resolvedCounted?: boolean
+  /**
+   * True while the chat runs in a detached worktree with no named branch yet.
+   * Manual chats start detached so a conversational turn that changes nothing
+   * leaves no junk `chat/*` branch; the branch is created lazily on the first
+   * turn that actually modifies files (see promoteManualWorktreeIfChanged).
+   */
+  detachedWorktree?: boolean
 }
 
 const getErrorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err))
@@ -897,13 +904,7 @@ export class RuntimeController extends EventEmitter {
         toolCallsMap.clear()
         const verb = randomThinkingVerb()
         const thinkingMsgId = generateMessageId()
-        // radar?.emitAgentMessage({
-        //   _id: thinkingMsgId,
-        //   chat: chatId,
-        //   role: 'reasoning',
-        //   content: `${verb}...`,
-        //   agentName: cfg.name
-        // })
+
         this.addSessionMessage(chatId, { id: thinkingMsgId, role: 'reasoning', content: `${verb}...` })
       },
 
@@ -1859,6 +1860,50 @@ export class RuntimeController extends EventEmitter {
     return GitService.makeChatBranchName(chatId, opts.title)
   }
 
+  /**
+   * Lazily names a branch for a manual chat's detached worktree, but only if the
+   * just-finished turn actually changed files. Conversational turns that touch
+   * nothing stay detached (no `chat/*` branch is ever created). Once promoted, the
+   * branch persists and follow-up turns reuse it via ensureChatGitWorkspace.
+   */
+  private async promoteManualWorktreeIfChanged(chatId: string, context: ChatContext): Promise<void> {
+    if (!context.detachedWorktree || !context.worktreeDir) return
+    let changed = false
+    try {
+      changed = await GitService.hasUncommittedChanges(context.worktreeDir)
+    } catch (err: unknown) {
+      this.log('error', `Failed to inspect worktree changes for ${chatId}: ${getErrorMessage(err)}`)
+      return
+    }
+    if (!changed) return
+
+    const detail = this.sessionDetails.get(chatId)
+    const branchName = GitService.makeChatBranchName(chatId, detail?.issueTitle ?? 'chat')
+    try {
+      await GitService.promoteWorktreeToBranch(context.worktreeDir, branchName)
+    } catch (err: unknown) {
+      this.log('error', `Failed to create branch ${branchName} for chat ${chatId}: ${getErrorMessage(err)}`)
+      return
+    }
+
+    context.branchName = branchName
+    context.detachedWorktree = false
+    this.updateSession({ chatId, branchName })
+
+    const msg = `Created branch \`${branchName}\` for your changes.`
+    this.log('info', `Promoted detached worktree to branch ${branchName} for chat ${chatId}`)
+    this.emitToRadar(chatId, msg, 'assistant', 'git')
+    this.addSessionMessage(chatId, { role: 'assistant', content: msg, activity: 'git' })
+
+    // Persist so the branch is reattached on restore instead of recomputed.
+    const cfg = this._config
+    if (this.radar && cfg.workspace && cfg.project) {
+      this.radar
+        .updateChat(cfg.workspace, cfg.project, chatId, { git: { branchName } })
+        .catch((err) => this.log('error', `Failed to persist chat branch for ${chatId}: ${getErrorMessage(err)}`))
+    }
+  }
+
   /** Re-attach worktree path after processIssue cleanup cleared worktreeDir. */
   private async silentlyRestoreWorktreeDir(context: ChatContext, branchName: string | undefined): Promise<void> {
     if (context.worktreeDir || !branchName) return
@@ -2131,10 +2176,45 @@ export class RuntimeController extends EventEmitter {
       }
     }
 
-    await this.ensureChatGitWorkspace(chatId, context, {
-      title: detail?.issueTitle ?? 'chat',
-      existingBranchName
-    })
+    // Lazy git for manual chats: a brand-new manual chat (no issue, no branch yet)
+    // runs in a *detached* worktree instead of eagerly cutting a `chat/*` branch.
+    // The branch is created only after a turn that actually changes files
+    // (promoteManualWorktreeIfChanged below), so conversational chats leave no junk.
+    const policy = resolveGitPolicy(cfg)
+    const useLazyManualGit =
+      policy.branchCreate && !policy.noGitBranch && !context.issue && !existingBranchName && !context.branchName
+    if (useLazyManualGit && !context.worktreeDir) {
+      // A prior run may have already promoted this chat to its (deterministic)
+      // branch without the server persisting it — reattach rather than orphan it.
+      const priorBranch = GitService.makeChatBranchName(chatId, detail?.issueTitle ?? 'chat')
+      const priorWorktree = await GitService.getWorktreeForBranch(cfg.dir, priorBranch)
+      if (priorWorktree) {
+        context.worktreeDir = priorWorktree
+        context.branchName = priorBranch
+        context.workspaceReady = true
+        this.updateSession({ chatId, branchName: priorBranch })
+      } else {
+        try {
+          const worktreePath = GitService.makeWorktreeDir(chatId)
+          context.worktreeDir = await GitService.createDetachedWorktree(cfg.dir, worktreePath)
+          context.detachedWorktree = true
+          context.workspaceReady = true
+          this.log('info', `Manual chat ${chatId}: detached worktree at ${context.worktreeDir} (branch deferred)`)
+        } catch (err: unknown) {
+          // Fall back to the eager branch worktree so edits stay isolated.
+          this.log('error', `Lazy worktree setup failed for ${chatId}, falling back: ${getErrorMessage(err)}`)
+          await this.ensureChatGitWorkspace(chatId, context, {
+            title: detail?.issueTitle ?? 'chat',
+            existingBranchName
+          })
+        }
+      }
+    } else if (!useLazyManualGit) {
+      await this.ensureChatGitWorkspace(chatId, context, {
+        title: detail?.issueTitle ?? 'chat',
+        existingBranchName
+      })
+    }
 
     const projectDir = context.worktreeDir ?? cfg.dir
 
@@ -2259,6 +2339,11 @@ export class RuntimeController extends EventEmitter {
     } finally {
       context.isProcessing = false
       context.abortController = null
+
+      // If this turn changed files in a detached manual-chat worktree, name a
+      // branch for them now (lazy branch creation). Runs before draining so a
+      // queued follow-up reuses the freshly created branch.
+      await this.promoteManualWorktreeIfChanged(chatId, context)
 
       // Drain any user messages that arrived while processing
       const queued = this.pendingMessages.get(chatId)

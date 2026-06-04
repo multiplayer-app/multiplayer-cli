@@ -220,6 +220,44 @@ export const createWorktree = async (repoDir: string, worktreeDir: string, branc
   return worktreeDir
 }
 
+/**
+ * Creates a worktree on a *detached* HEAD (no branch). Used for manual chats so
+ * a turn that changes nothing leaves no junk branch behind — the branch is only
+ * created later via promoteWorktreeToBranch if the agent actually edits files.
+ * Branches from the remote default branch when available, else local HEAD; skips
+ * the network fetch to keep per-chat setup fast.
+ */
+export const createDetachedWorktree = async (repoDir: string, worktreeDir: string): Promise<string> => {
+  const git = simpleGit(repoDir)
+  let baseRef = 'HEAD'
+  try {
+    const defaultBranch = await getDefaultBranch(repoDir)
+    const candidate = `origin/${defaultBranch}`
+    // Non-quiet so a missing ref rejects (—quiet exits 1 but simple-git ignores that).
+    await git.raw(['rev-parse', '--verify', candidate])
+    baseRef = candidate
+  } catch {
+    baseRef = 'HEAD'
+  }
+  await git.raw(['worktree', 'add', '--detach', worktreeDir, baseRef])
+  return worktreeDir
+}
+
+/**
+ * Names the detached worktree's current state as a branch, preserving any
+ * uncommitted working-tree changes. Falls back to -B if a stale branch of the
+ * same name lingers from a previous attempt.
+ */
+export const promoteWorktreeToBranch = async (worktreeDir: string, branchName: string): Promise<void> => {
+  const git = simpleGit(worktreeDir)
+  try {
+    await git.checkoutLocalBranch(branchName)
+  } catch {
+    // Branch already exists locally — re-point it at HEAD, keeping working changes.
+    await git.raw(['checkout', '-B', branchName])
+  }
+}
+
 export const branchExistsLocally = async (dir: string, branchName: string): Promise<boolean> => {
   try {
     const git = simpleGit(dir)
