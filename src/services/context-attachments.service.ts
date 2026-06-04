@@ -18,7 +18,9 @@ export const CONTEXT_ATTACHMENT_KIND = {
   /** Selected span(s) — inline metadata.data only; no session fetch. */
   DEBUG_SESSION_SPAN: 'debugSessionSpan',
   /** Playback snapshot — render frame via assets snapshot endpoint. */
-  DEBUG_SESSION_SNAPSHOT: 'debugSessionSnapshot'
+  DEBUG_SESSION_SNAPSHOT: 'debugSessionSnapshot',
+  /** DOM element picked in recording inspector — inline metadata.data only. */
+  DEBUG_SESSION_ELEMENT: 'debugSessionElement'
 } as const
 
 export type ContextAttachmentKind = (typeof CONTEXT_ATTACHMENT_KIND)[keyof typeof CONTEXT_ATTACHMENT_KIND]
@@ -48,6 +50,32 @@ export interface DebugSessionSnapshotAttachmentData {
   debugSessionUrl?: string
   timestampMs: number
   relativeTime?: string
+}
+
+export interface ElementPathItem {
+  tagName: string
+  className?: string
+  id?: string
+  nthChild?: number
+  attributes?: Record<string, string>
+}
+
+export interface DebugSessionElementAttachmentData {
+  debugSessionId: string
+  debugSessionName?: string
+  debugSessionUrl?: string
+  timestampMs: number
+  relativeTime?: string
+  selector: string
+  tagName: string
+  id?: string
+  className?: string
+  textContent?: string
+  attributes?: Array<{ name: string; value: string }>
+  computedStyles?: Record<string, string>
+  rect?: { width: number; height: number; left: number; top: number }
+  path?: ElementPathItem[]
+  message?: string
 }
 
 type LogFn = (level: 'info' | 'error', message: string) => void
@@ -80,6 +108,47 @@ const clipJson = (value: unknown, maxChars: number): string => {
   const json = JSON.stringify(value, null, 2)
   if (json.length <= maxChars) return json
   return `${json.slice(0, maxChars)}\n… (truncated)`
+}
+
+const getElementData = (attachment: AgentAttachment): DebugSessionElementAttachmentData | undefined => {
+  const data = attachment.metadata?.data as Record<string, unknown> | undefined
+  const debugSessionId = data?.debugSessionId
+  const timestampMs = data?.timestampMs
+  const selector = data?.selector
+  const tagName = data?.tagName
+
+  if (typeof debugSessionId !== 'string' || !debugSessionId) return undefined
+  if (typeof timestampMs !== 'number' || !Number.isFinite(timestampMs) || timestampMs < 0) return undefined
+  if (typeof selector !== 'string' || !selector) return undefined
+  if (typeof tagName !== 'string' || !tagName) return undefined
+
+  return {
+    debugSessionId,
+    debugSessionName: typeof data?.debugSessionName === 'string' ? data.debugSessionName : undefined,
+    debugSessionUrl: typeof data?.debugSessionUrl === 'string' ? data.debugSessionUrl : undefined,
+    timestampMs: Math.floor(timestampMs),
+    relativeTime: typeof data?.relativeTime === 'string' ? data.relativeTime : undefined,
+    selector,
+    tagName,
+    id: typeof data?.id === 'string' ? data.id : undefined,
+    className: typeof data?.className === 'string' ? data.className : undefined,
+    textContent: typeof data?.textContent === 'string' ? data.textContent : undefined,
+    attributes: Array.isArray(data?.attributes)
+      ? (data.attributes as Array<{ name?: string; value?: string }>)
+          .filter((a) => typeof a?.name === 'string')
+          .map((a) => ({ name: a.name as string, value: String(a.value ?? '') }))
+      : undefined,
+    computedStyles:
+      data?.computedStyles && typeof data.computedStyles === 'object' && !Array.isArray(data.computedStyles)
+        ? (data.computedStyles as Record<string, string>)
+        : undefined,
+    rect:
+      data?.rect && typeof data.rect === 'object' && !Array.isArray(data.rect)
+        ? (data.rect as DebugSessionElementAttachmentData['rect'])
+        : undefined,
+    path: Array.isArray(data?.path) ? (data.path as ElementPathItem[]) : undefined,
+    message: typeof data?.message === 'string' ? data.message : undefined
+  }
 }
 
 const getSnapshotData = (attachment: AgentAttachment): DebugSessionSnapshotAttachmentData | undefined => {
@@ -178,6 +247,64 @@ export const buildSpanAttachmentPromptSection = (attachment: AgentAttachment): s
   ].join('\n')
 
   return ['## Context Attachment: debug session span', wrapUntrustedObservabilityData(body)].join('\n\n')
+}
+
+/**
+ * Formats an inline debug-session DOM element attachment for the model prompt.
+ */
+export const buildElementAttachmentPromptSection = (attachment: AgentAttachment): string | undefined => {
+  const data = getElementData(attachment)
+  if (!data) return undefined
+
+  const summary = typeof attachment.metadata?.summary === 'string' ? attachment.metadata.summary : undefined
+  const headerLines = [`# Attached DOM Element: ${attachment.name}`, '']
+
+  if (data.debugSessionId) headerLines.push(`**Session ID:** \`${data.debugSessionId}\``)
+  if (data.debugSessionName) headerLines.push(`**Session:** ${data.debugSessionName}`)
+  if (data.debugSessionUrl) headerLines.push(`**URL:** ${data.debugSessionUrl}`)
+  if (data.relativeTime) {
+    headerLines.push(`**Playback time:** ${data.relativeTime} (${data.timestampMs}ms)`)
+  } else {
+    headerLines.push(`**Playback offset:** ${data.timestampMs}ms`)
+  }
+
+  headerLines.push(`**Selector:** \`${data.selector}\``)
+  headerLines.push(`**Tag:** \`${data.tagName}\``)
+  if (data.id) headerLines.push(`**ID:** \`${data.id}\``)
+  if (data.className) headerLines.push(`**Classes:** \`${data.className}\``)
+  if (data.textContent) headerLines.push(`**Text:** ${data.textContent}`)
+  if (data.message) headerLines.push('', `**User note:** ${data.message}`)
+  if (summary) headerLines.push('', `_${summary}_`)
+
+  const body = [
+    ...headerLines,
+    '',
+    '_Analyze only the DOM element data attached below. Do not fetch the full debug session unless the user explicitly asks._',
+    '',
+    '## Element Data',
+    '```json',
+    clipJson(sanitizeCapturedValue(data), MAX_SPAN_JSON_CHARS),
+    '```'
+  ].join('\n')
+
+  return ['## Context Attachment: debug session element', wrapUntrustedObservabilityData(body)].join('\n\n')
+}
+
+const appendElementContextToMessage = (
+  content: string,
+  attachments: AgentAttachment[] | undefined,
+  onLog?: LogFn
+): string => {
+  const elementAttachments = getContextAttachmentsByKind(attachments, CONTEXT_ATTACHMENT_KIND.DEBUG_SESSION_ELEMENT)
+  if (!elementAttachments.length) return content
+
+  let messageContent = content
+  for (const attachment of elementAttachments) {
+    onLog?.('info', `Inlining debug session element attachment "${attachment.name}"`)
+    const section = buildElementAttachmentPromptSection(attachment)
+    if (section) messageContent = `${messageContent}\n\n${section}`
+  }
+  return messageContent
 }
 
 const appendSpanContextToMessage = (
@@ -355,6 +482,7 @@ export const enrichUserMessageWithContextAttachments = async (
 ): Promise<EnrichUserMessageResult> => {
   // Strict routing by metadata.kind — each kind uses a different data source.
   let messageContent = appendSpanContextToMessage(params.content, params.attachments, params.onLog)
+  messageContent = appendElementContextToMessage(messageContent, params.attachments, params.onLog)
 
   const snapshotResult = await resolveSnapshotAttachments(messageContent, params.attachments, {
     workspaceId: params.workspaceId,
@@ -408,6 +536,7 @@ export const buildRestoredUserMessage = async (
   }
 
   messageContent = appendSpanContextToMessage(messageContent, attachments)
+  messageContent = appendElementContextToMessage(messageContent, attachments)
 
   if (options?.workspaceId && options?.projectId && options?.mcpConfig) {
     const snapshotResult = await resolveSnapshotAttachments(messageContent, attachments, options)
