@@ -361,7 +361,7 @@ export function DemoSetupFlow({
       {step === 'model' && <ModelStep config={config} onComplete={advance} />}
       {step === 'demo-setup' && <DemoSetupStep config={config} onComplete={advance} onBack={goBack} />}
       {step === 'connecting' && (
-        <ConnectingStep config={config as AgentConfig} onComplete={onComplete} onBack={goBack} />
+        <ConnectingStep config={config as AgentConfig} onComplete={onComplete} onBack={goBack} onChangeModel={() => setStep('model')} />
       )}
     </SetupShell>
   ) as ReactElement

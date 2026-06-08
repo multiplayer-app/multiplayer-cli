@@ -38,6 +38,8 @@ export const createBranch = async (dir: string, branchName: string): Promise<voi
 export const commitAll = async (dir: string, message: string): Promise<string> => {
   const git: SimpleGit = simpleGit(dir)
   await git.add('.')
+  const status = await git.status()
+  if (status.isClean()) return ''
   const result = await git.commit(message)
   return result.commit
 }

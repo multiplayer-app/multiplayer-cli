@@ -25,7 +25,7 @@ export const isAnthropicModel = (model: string): boolean =>
 export const isGeminiModel = (model: string): boolean => model.startsWith('gemini')
 
 /** True for OpenAI Codex models. */
-export const isCodexModel = (model: string): boolean => model.startsWith('codex')
+export const isCodexModel = (model: string): boolean => model.includes('codex')
 
 // ─── Default base URLs ────────────────────────────────────────────────────────
 

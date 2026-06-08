@@ -16,6 +16,11 @@
  */
 
 import OpenAI from 'openai'
+import type {
+  ResponseFunctionToolCall,
+  ResponseInputItem,
+  ResponseOutputItem,
+} from 'openai/resources/responses/responses.js'
 import path from 'path'
 import fs from 'fs'
 import type {
@@ -28,6 +33,11 @@ import type {
 } from '../types.js'
 import { MAX_FILE_SIZE, MAX_FILES_TO_READ } from '../../../config.js'
 import { buildDebuggingSystemPrompt } from '../../../prompts.js'
+
+/** Models that use the Responses API instead of Chat Completions. */
+function isResponsesApiModel(model: string): boolean {
+  return model.includes('codex')
+}
 
 // ─── Built-in tool definitions ────────────────────────────────────────────────
 
@@ -100,7 +110,24 @@ function readFileSafe(projectDir: string, filePath: string): string {
       return 'Error: Access denied — path is outside the project directory.'
     }
     if (!fs.existsSync(resolved)) {
-      return `Error: File not found: ${filePath}`
+      const srcGuess = filePath.replace(/\bdist\b/, 'src').replace(/\.js$/, '.ts')
+      const srcResolved = path.resolve(projectDir, srcGuess)
+      if (srcGuess !== filePath && fs.existsSync(srcResolved)) {
+        const content = fs.readFileSync(srcResolved, 'utf-8')
+        return `(Note: "${filePath}" not found; serving source equivalent "${srcGuess}" instead)\n\n` +
+          (content.length > MAX_FILE_SIZE ? content.slice(0, MAX_FILE_SIZE) + `\n\n[… truncated]` : content)
+      }
+      // Auto-list parent or root directory so the model can self-correct without an extra round-trip
+      const absRoot = path.resolve(projectDir)
+      const parentDir = path.dirname(filePath)
+      const parentResolved = path.resolve(projectDir, parentDir)
+      let listing = ''
+      if (parentDir !== '.' && fs.existsSync(parentResolved) && fs.statSync(parentResolved).isDirectory()) {
+        listing = `\n\nContents of "${parentDir}":\n${fs.readdirSync(parentResolved).slice(0, 50).join('\n')}`
+      } else {
+        listing = `\n\nProject root contents:\n${fs.readdirSync(absRoot).slice(0, 50).join('\n')}`
+      }
+      return `Error: File not found: ${filePath}\nThe project root is: ${absRoot}\nPaths must be relative to this root.${listing}`
     }
     const stat = fs.statSync(resolved)
     if (stat.isDirectory()) {
@@ -196,8 +223,20 @@ export class OpenAICompatibleProvider implements LLMProvider {
   // ── complete() ─────────────────────────────────────────────────────────────
 
   async complete(request: CompletionRequest): Promise<{ text: string }> {
-    const messages: OpenAI.Chat.ChatCompletionMessageParam[] = []
+    if (isResponsesApiModel(this.model)) {
+      const input: ResponseInputItem[] = [{ role: 'user', content: request.userMessage }]
+      const response = await this.client.responses.create({
+        model: this.model,
+        input,
+        ...(request.systemPrompt ? { instructions: request.systemPrompt } : {}),
+        ...(request.maxTokens ? { max_output_tokens: request.maxTokens } : {}),
+        stream: false,
+      })
+      const text = (response.output_text ?? '') as string
+      return { text }
+    }
 
+    const messages: OpenAI.Chat.ChatCompletionMessageParam[] = []
     if (request.systemPrompt) {
       messages.push({ role: 'system', content: request.systemPrompt })
     }
@@ -215,6 +254,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
   // ── runAgentic() ───────────────────────────────────────────────────────────
 
   async *runAgentic(request: AgenticRequest): AsyncIterable<AgentStreamEvent> {
+    if (isResponsesApiModel(this.model)) {
+      yield* this.runAgenticResponses(request)
+      return
+    }
+    yield* this.runAgenticChatCompletions(request)
+  }
+
+  /** Agentic loop via Chat Completions — used for gpt-*, o*, openrouter, etc. */
+  private async *runAgenticChatCompletions(request: AgenticRequest): AsyncIterable<AgentStreamEvent> {
     const {
       history,
       projectDir,
@@ -318,6 +366,133 @@ export class OpenAICompatibleProvider implements LLMProvider {
     yield { type: 'done', finalText }
   }
 
+  /** Agentic loop via Responses API — used for codex-* models. */
+  private async *runAgenticResponses(request: AgenticRequest): AsyncIterable<AgentStreamEvent> {
+    const {
+      history,
+      projectDir,
+      systemPrompt,
+      extraTools = [],
+      extraToolHandlers = {},
+      confirmToolCall,
+      abortSignal,
+      isFixFlow,
+      isDemoProject,
+    } = request
+
+    const effectiveSystemPrompt = systemPrompt ?? buildDebuggingSystemPrompt(projectDir, isDemoProject)
+
+    // Responses API uses FunctionTool shape (not Chat Completions' ChatCompletionTool)
+    const allTools = [TOOL_READ_FILE, TOOL_WRITE_PATCH, ...extraTools]
+    const tools = allTools.map((t) => ({
+      type: 'function' as const,
+      name: t.name,
+      description: t.description ?? '',
+      parameters: t.parameters as Record<string, unknown>,
+      strict: false,
+    }))
+
+    // Build initial input from history (EasyInputMessage format)
+    const input: ResponseInputItem[] = history.map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    }))
+
+    const collectedPatches: FilePatch[] = []
+    let filesRead = 0
+    let finalText = ''
+
+    try {
+      for (let turn = 0; turn < 20; turn++) {
+        if (abortSignal?.aborted) {
+          yield { type: 'aborted' }
+          return
+        }
+
+        yield { type: 'turn_start' }
+        yield { type: 'progress', message: `Thinking (turn ${turn + 1})…` }
+
+        const response = await this.client.responses.create({
+          model: this.model,
+          input,
+          instructions: effectiveSystemPrompt,
+          tools,
+          tool_choice: 'auto',
+          stream: false,
+        })
+
+        // Collect text and function calls from the output
+        const functionCalls: ResponseFunctionToolCall[] = []
+
+        for (const item of response.output as ResponseOutputItem[]) {
+          if (item.type === 'message') {
+            const text = item.content
+              .map((c) => (c.type === 'output_text' ? c.text : ''))
+              .join('')
+            if (text) {
+              finalText += text
+              yield { type: 'text_delta', text }
+            }
+          } else if (item.type === 'function_call') {
+            functionCalls.push(item as ResponseFunctionToolCall)
+          }
+        }
+
+        // Append the model's output to input for subsequent turns
+        for (const item of response.output) {
+          input.push(item as ResponseInputItem)
+        }
+
+        if (functionCalls.length === 0) break
+
+        // Execute tool calls and feed results back
+        for (const fc of functionCalls) {
+          const name = fc.name
+          const callId = fc.call_id
+          const toolInput = safeParseJson(fc.arguments)
+
+          let approved = true
+          let rejectionMessage: string | undefined
+          if (confirmToolCall && CONFIRM_REQUIRED_TOOLS.has(name)) {
+            yield { type: 'tool_confirm', id: callId, name, input: toolInput }
+            const confirmation = await confirmToolCall(callId, name, toolInput)
+            approved = confirmation.approved
+            rejectionMessage = confirmation.userResponse
+          }
+
+          yield { type: 'tool_call', id: callId, name, input: toolInput }
+
+          const { result, status } = approved
+            ? await this.executeTool(name, toolInput, projectDir, extraToolHandlers, filesRead, collectedPatches)
+            : { result: rejectionMessage ?? 'Rejected by user.', status: 'failed' as const }
+
+          if (approved && name === 'read_file') filesRead++
+
+          yield { type: 'tool_result', id: callId, name, input: toolInput, status, output: { content: result } }
+
+          // Responses API tool result format
+          input.push({
+            type: 'function_call_output',
+            call_id: callId,
+            output: result,
+          } as ResponseInputItem)
+        }
+
+        if (collectedPatches.length > 0) break
+      }
+    } catch (err) {
+      yield { type: 'error', error: err instanceof Error ? err : new Error(String(err)) }
+      return
+    }
+
+    if (isFixFlow && collectedPatches.length > 0) {
+      applyPatches(projectDir, collectedPatches)
+      yield { type: 'patch', patches: collectedPatches }
+    }
+
+    yield { type: 'done', finalText }
+  }
+
   // ── validateCredentials() ──────────────────────────────────────────────────
 
   async validateCredentials(): Promise<void> {
@@ -338,10 +513,9 @@ export class OpenAICompatibleProvider implements LLMProvider {
       throw new Error(`AI API key validation failed: ${msg}`)
     }
 
-    // Only gate on the model when the provider actually returns a list —
-    // some OpenAI-compatible endpoints (e.g. Gemini, some OpenRouter configs)
-    // return an empty list, and we shouldn't false-fail there.
-    if (modelIds.length > 0 && !modelIds.includes(this.model)) {
+    // Codex models (e.g. codex-mini-latest) are aliases not listed by /v1/models.
+    // Skip the presence check for them — the API will reject invalid model names on use.
+    if (!isResponsesApiModel(this.model) && modelIds.length > 0 && !modelIds.includes(this.model)) {
       throw new Error(
         `Selected model "${this.model}" is not available from this provider. Pick a different model with --model.`,
       )

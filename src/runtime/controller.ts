@@ -1484,10 +1484,11 @@ export class RuntimeController extends EventEmitter {
         startedAt: new Date()
       }
       this.setState(addSession(this._state, summary))
+      // Update routing fields (agentName, dir) without overwriting the server-side
+      // status — the chat may already be 'finished' if the fix was previously committed.
       this.radar?.emitAgentChatUpdate({
         _id: chatId,
         contextKey: issue.componentHash,
-        status: 'processing',
         agentName: cfg.name,
         dir: cfg.dir
       })

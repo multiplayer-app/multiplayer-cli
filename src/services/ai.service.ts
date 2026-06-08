@@ -198,6 +198,16 @@ export const detectGeminiCliAuth = (): { source: 'env'; key: string } | null => 
   return null
 }
 
+export const fetchGeminiModels = async (apiKey: string): Promise<string[]> => {
+  try {
+    const { GoogleAIProvider } = await import('../lib/llm/providers/google.js')
+    const provider = new GoogleAIProvider({ model: 'gemini-2.5-flash', apiKey })
+    return await provider.listModels()
+  } catch {
+    return []
+  }
+}
+
 export const checkGeminiRequirements = async (apiKey: string, model: string): Promise<void> => {
   const { GoogleAIProvider } = await import('../lib/llm/providers/google.js')
   const provider = new GoogleAIProvider({ model, apiKey })
@@ -225,9 +235,10 @@ export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string, 
     throw new Error(`AI API key validation failed: ${msg}`)
   }
 
-  // Only gate on the model when the provider actually returns a list — some
-  // OpenAI-compatible endpoints return nothing, and we shouldn't false-fail there.
-  if (model && modelIds.length > 0 && !modelIds.includes(model)) {
+  // Codex models (codex-mini-latest etc.) are aliases not listed by /v1/models —
+  // skip the presence check for them.
+  const isCodex = model?.includes('codex')
+  if (!isCodex && model && modelIds.length > 0 && !modelIds.includes(model)) {
     throw new Error(
       `Selected model "${model}" is not available from this provider. Pick a different model with --model.`,
     )

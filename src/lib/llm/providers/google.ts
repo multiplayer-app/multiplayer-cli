@@ -62,7 +62,7 @@ const TOOL_WRITE_PATCH: ToolDefinition = {
 function buildGeminiContents(
   history: AgenticRequest['history'],
 ): Content[] {
-  const contents: Content[] = []
+  const raw: Content[] = []
 
   for (let i = 0; i < history.length; i++) {
     const msg = history[i]!
@@ -78,14 +78,28 @@ function buildGeminiContents(
         const mimeType = meta.replace('data:', '').replace(';base64', '')
         parts.push({ inlineData: { mimeType, data } })
       }
-      contents.push({ role, parts })
+      if (parts.length > 0) raw.push({ role, parts })
     } else {
       let text = msg.content
       // Serialize prior-turn images as text placeholders
       if (msg.images?.length && i < history.length - 1) {
         text += '\n\n' + msg.images.map((_, n) => `[Image ${n + 1}: attached]`).join('\n')
       }
-      contents.push({ role, parts: [{ text }] })
+      // Gemini rejects empty text parts (tool-call-only turns stored with content:'')
+      if (!text) continue
+      raw.push({ role, parts: [{ text }] })
+    }
+  }
+
+  // Gemini requires strictly alternating user/model turns. Skipping empty
+  // messages can leave consecutive same-role turns, so merge them.
+  const contents: Content[] = []
+  for (const entry of raw) {
+    const prev = contents[contents.length - 1]
+    if (prev && prev.role === entry.role) {
+      prev.parts = [...(prev.parts ?? []), ...(entry.parts ?? [])]
+    } else {
+      contents.push({ ...entry })
     }
   }
 
@@ -100,7 +114,18 @@ function readFileSafe(projectDir: string, filePath: string): string {
     if (!resolved.startsWith(path.resolve(projectDir))) {
       return 'Error: Access denied — path is outside the project directory.'
     }
-    if (!fs.existsSync(resolved)) return `Error: File not found: ${filePath}`
+    if (!fs.existsSync(resolved)) {
+      // Try to find a similarly-named source file when given a dist/compiled path,
+      // e.g. dist/foo.js → src/foo.ts
+      const srcGuess = filePath.replace(/\bdist\b/, 'src').replace(/\.js$/, '.ts')
+      const srcResolved = path.resolve(projectDir, srcGuess)
+      if (srcGuess !== filePath && fs.existsSync(srcResolved)) {
+        const content = fs.readFileSync(srcResolved, 'utf-8')
+        return `(Note: "${filePath}" not found; serving source equivalent "${srcGuess}" instead)\n\n` +
+          (content.length > MAX_FILE_SIZE ? content.slice(0, MAX_FILE_SIZE) + `\n\n[… truncated]` : content)
+      }
+      return `Error: File not found: ${filePath}\nThe project root is: ${projectDir}\nPaths must be relative to this root. Call read_file on a parent directory (e.g. "." or "src") to list available files.`
+    }
     const stat = fs.statSync(resolved)
     if (stat.isDirectory()) {
       return `Directory contents:\n${fs.readdirSync(resolved).slice(0, 50).join('\n')}`
@@ -176,7 +201,7 @@ export class GoogleAIProvider implements LLMProvider {
       isDemoProject,
     } = request
 
-    const effectiveSystemPrompt = systemPrompt ?? buildDebuggingSystemPrompt(undefined, isDemoProject)
+    const effectiveSystemPrompt = systemPrompt ?? buildDebuggingSystemPrompt(projectDir, isDemoProject)
     const allTools = [TOOL_READ_FILE, TOOL_WRITE_PATCH, ...extraTools]
     const toolDeclarations = allTools.map((t) => ({
       name: t.name,
@@ -364,10 +389,16 @@ export class GoogleAIProvider implements LLMProvider {
     try {
       const ids: string[] = []
       for await (const m of await this.genai.models.list()) {
-        const name = (m as { name?: string }).name
-        if (name) ids.push(name.replace(/^models\//, ''))
+        const model = m as { name?: string; description?: string }
+        const name = model.name
+        if (!name) continue
+        // Google doesn't expose a deprecation flag, but sometimes signals it in the description.
+        const desc = (model.description ?? '').toLowerCase()
+        if (desc.includes('deprecated') || desc.includes('no longer available')) continue
+        ids.push(name.replace(/^models\//, ''))
       }
-      return ids.filter((id) => id.startsWith('gemini'))
+      const RETIRED = new Set(['gemini-2.0-flash', 'gemini-2.0-flash-lite'])
+      return ids.filter((id) => id.startsWith('gemini') && !RETIRED.has(id))
     } catch {
       return []
     }

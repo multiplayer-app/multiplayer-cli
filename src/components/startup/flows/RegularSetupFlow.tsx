@@ -3,7 +3,7 @@ import { useKeyboard } from '@opentui/react'
 import type { AgentConfig } from '../../../types/index.js'
 import { API_URL } from '../../../config.js'
 import { createApiService } from '../../../services/api.service.js'
-import { listAccounts } from '../../../cli/profile.js'
+import { listAccounts, readProjectSettings } from '../../../cli/profile.js'
 import { persistSetupState } from '../../../cli/setup-persistence.js'
 import { SetupShell, type SidebarEntry } from '../SetupShell.js'
 import { AccountSelectStep } from '../AccountSelectStep.js'
@@ -182,7 +182,12 @@ export function RegularSetupFlow({
       const effectiveAccount = accountOverride ?? account
       if (accountOverride) setAccount(accountOverride)
 
-      const merged = { ...config, ...updates }
+      // When the directory is first set, merge any existing project settings so
+      // that fields like model/modelKey saved from a previous session are pre-filled.
+      const dirJustSet = updates.dir && updates.dir !== config.dir
+      const existingProjectSettings = dirJustSet ? readProjectSettings(updates.dir!) : {}
+
+      const merged = { ...existingProjectSettings, ...config, ...updates }
       const extras = persistSetupState(merged, { account: effectiveAccount, isDemoFlow: false })
       const next = { ...merged, ...extras }
       setConfig(next)
@@ -391,7 +396,7 @@ export function RegularSetupFlow({
         <MultiplayerSdkStep config={config} onComplete={advance} onBack={goBack} />
       )}
       {step === 'connecting' && (
-        <ConnectingStep config={config as AgentConfig} onComplete={onComplete} onBack={goBack} />
+        <ConnectingStep config={config as AgentConfig} onComplete={onComplete} onBack={goBack} onChangeModel={() => setStep('model')} />
       )}
     </SetupShell>
   ) as ReactElement

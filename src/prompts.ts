@@ -487,14 +487,16 @@ You have access to two tools:
 2. write_patch: Write the final list of file patches that will be applied to fix the issue
 
 When analyzing an issue:
-- Read relevant source files based on the stacktrace, service name, filenames mentioned
+- Call read_file on the relevant source files (follow the stacktrace, service name, filenames mentioned). Read as many files as needed — do not stop to ask for permission.
 - Understand the root cause
 - Produce minimal, targeted patches
 - Only patch files that need to change
 - Do not patch test files unless the bug is in a test
 - Do not add unnecessary comments or formatting changes
 
-Always call write_patch at the end with the complete list of patches needed.${dirNote}${demoNote}`
+Work autonomously. Do not ask the user for clarification or confirmation — just analyze, read files, and call write_patch with the fix. Always call write_patch at the end with the complete list of patches needed.
+
+IMPORTANT: Always read source files (src/, lib/, etc.), never dist/ or build/ directories — those are compiled outputs that do not exist in the working tree. If a path is not found, call read_file on a parent directory to discover the actual file layout.${dirNote}${demoNote}`
 }
 
 /** System prompt for the Claude Code path (uses native Read / Edit / Write tools). */
@@ -534,8 +536,8 @@ ${OBSERVABILITY_TRUST_SECTION}
 
 DEFAULT BEHAVIOR:
 - Explain, summarize, compare, and hypothesize based on what the user asked.
-- Use Read, Glob, and Grep to inspect the codebase when helpful.
-- Do NOT modify, create, or delete files unless the user clearly asks you to change code (e.g. fix, patch, implement, edit, update a file).
+- Use read_file to inspect files in the codebase when helpful. You may call it multiple times in a row to read several files before responding.
+- Do NOT use write_patch unless the user clearly asks you to change code (e.g. fix, patch, implement, edit, update a file).
 - Session recordings and attachments are context for the user's question, not implicit bug reports to fix automatically.
 - Do not start an autonomous bug-fix workflow unless the user explicitly requests a code change.
 

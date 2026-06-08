@@ -81,7 +81,7 @@ const PROVIDERS: ProviderDef[] = [
     iconColor: '#34d399',
     baseUrl: GEMINI_BASE_URL,
     keyPlaceholder: 'AIza...',
-    fallbackModels: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
+    fallbackModels: ['gemini-2.5-pro', 'gemini-2.5-flash'],
   },
   {
     id: 'openrouter',
@@ -116,7 +116,7 @@ function filterModels(provider: Provider, modelIds: string[]): string[] {
     case 'openai':
       return modelIds.filter((id) => /^(gpt-|o\d)/.test(id))
     case 'codex':
-      return modelIds.filter((id) => id.startsWith('codex'))
+      return modelIds.filter((id) => id.includes('codex'))
     case 'gemini':
       return modelIds.filter((id) => id.startsWith('gemini'))
     case 'claude':
@@ -127,9 +127,32 @@ function filterModels(provider: Provider, modelIds: string[]): string[] {
   }
 }
 
+/**
+ * Infers which provider a saved config belongs to, so we can avoid reusing
+ * a key from one provider (e.g. Gemini) when the user switches to another (e.g. Codex).
+ */
+function inferCurrentProvider(config: Partial<AgentConfig>): Provider | null {
+  if (!config.modelKey && !config.model) return null
+  if (config.model?.startsWith('claude')) return 'claude'
+  if (config.modelUrl === GEMINI_BASE_URL) return 'gemini'
+  if (config.modelUrl === OPENROUTER_BASE_URL) return 'openrouter'
+  if (config.model) return 'openai' // openai and codex share the same key format
+  return null
+}
+
+/** Returns true if the saved config key is compatible with the target provider. */
+function savedKeyFitsProvider(provider: ProviderDef, config: Partial<AgentConfig>): boolean {
+  const current = inferCurrentProvider(config)
+  if (!current || !config.modelKey) return false
+  if (current === provider.id) return true
+  // openai and codex use the same OpenAI key format — keys are interchangeable
+  if ((current === 'openai' || current === 'codex') && (provider.id === 'openai' || provider.id === 'codex')) return true
+  return false
+}
+
 /** Infers a short human-readable description from a model ID. */
 function describeModel(id: string): string | undefined {
-  if (id === 'claude-code') return "Claude Code's default (recommended)"
+  if (id === 'claude-code') return 'Claude Code\'s default (recommended)'
   if (id.includes('opus')) return 'Most powerful'
   if (id.includes('sonnet')) return 'Fast, capable'
   if (id.includes('haiku')) return 'Fastest'
@@ -149,13 +172,13 @@ interface Props {
 }
 
 type SubStep =
-  | 'detecting'    // checking if Claude CLI is present
-  | 'provider'     // select a provider
-  | 'api-key'      // enter API key (non-Claude providers)
-  | 'fetching'     // spinner while fetching model list
-  | 'model'        // pick a model from the live-fetched list
+  | 'detecting' // checking if Claude CLI is present
+  | 'provider' // select a provider
+  | 'api-key' // enter API key (non-Claude providers)
+  | 'fetching' // spinner while fetching model list
+  | 'model' // pick a model from the live-fetched list
   | 'custom-model' // type a model name manually (custom / openrouter / __custom__ choice)
-  | 'api-url'      // enter optional base URL (OpenAI / Codex / custom endpoint)
+  | 'api-url' // enter optional base URL (OpenAI / Codex / custom endpoint)
 
 export function ModelStep({ config, onComplete, onBack }: Props): ReactElement | null {
   // ── Detection state ───────────────────────────────────────────────────────
@@ -230,7 +253,9 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
       ids =
         provider.id === 'claude'
           ? await AiService.fetchAnthropicModels(key || undefined)
-          : await AiService.fetchOpenAiCompatibleModels(key, provider.baseUrl)
+          : provider.id === 'gemini'
+            ? await AiService.fetchGeminiModels(key)
+            : await AiService.fetchOpenAiCompatibleModels(key, provider.baseUrl)
     } catch {
       ids = []
     }
@@ -245,9 +270,10 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
         ? ['claude-code', ...resolved.filter((m) => m !== 'claude-code')]
         : resolved
 
+    const currentIdx = config.model ? models.indexOf(config.model) : -1
     setFetchStatusMsg(null)
     setModelList(models)
-    setModelIndex(0)
+    setModelIndex(currentIdx >= 0 ? currentIdx : 0)
     setSubStep('model')
   }, [])
 
@@ -272,12 +298,15 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
     if (provider.id === 'gemini') {
       // Check GEMINI_API_KEY env var before asking the user.
       const detected = AiService.detectGeminiCliAuth()
-      if (detected && !config.modelKey) {
+      const compatibleKey = savedKeyFitsProvider(provider, config) ? config.modelKey : undefined
+      if (detected && !compatibleKey) {
         setGeminiCliAuth(detected)
         setApiKey(detected.key)
+      } else if (!compatibleKey) {
+        setApiKey('')
       }
 
-      const fetchKey = config.modelKey || detected?.key || ''
+      const fetchKey = compatibleKey || detected?.key || ''
       if (fetchKey) {
         void fetchAndShowModels(provider, fetchKey)
       } else {
@@ -288,9 +317,13 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
       return
     }
 
-    const savedKey = config.modelKey ?? ''
+    // For OpenAI / Codex / OpenRouter: only reuse the saved key if it came from
+    // the same provider family. A Gemini key is not valid for OpenAI, etc.
+    const savedKey = savedKeyFitsProvider(provider, config) ? (config.modelKey ?? '') : ''
+    if (!savedKey) setApiKey('') // Clear stale key from a different provider
+
     if (savedKey) {
-      // Have a saved key — fetch live models straight away
+      // Have a compatible saved key — fetch live models straight away
       void fetchAndShowModels(provider, savedKey)
     } else {
       // No API key yet — show fallback models so the user can browse.
@@ -312,7 +345,8 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
     }
 
     const provider = selectedProvider!
-    const effectiveKey = apiKey || config.modelKey || ''
+    // Don't fall back to config.modelKey if it belongs to a different provider.
+    const effectiveKey = apiKey || (savedKeyFitsProvider(provider, config) ? config.modelKey ?? '' : '')
     setPendingModelId(modelId)
 
     if (provider.id === 'claude') {
@@ -396,7 +430,7 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
     setPendingModelId(trimmed)
 
     const provider = selectedProvider!
-    const effectiveKey = apiKey || config.modelKey || ''
+    const effectiveKey = apiKey || (savedKeyFitsProvider(provider, config) ? config.modelKey ?? '' : '')
 
     // No key yet — collect it
     if (!effectiveKey && provider.id !== 'custom') {
@@ -420,7 +454,7 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
   const handleApiUrlSubmit = (input: string) => {
     const trimmed = input.trim()
     const provider = selectedProvider!
-    const effectiveKey = apiKey || config.modelKey || ''
+    const effectiveKey = apiKey || (savedKeyFitsProvider(provider, config) ? config.modelKey ?? '' : '')
     const modelId = pendingModelId ?? ''
     onComplete({ model: modelId, modelKey: effectiveKey, modelUrl: trimmed || provider.baseUrl })
   }
@@ -581,7 +615,7 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
 
   if (subStep === 'model') {
     const provider = selectedProvider!
-    const hasKey = !!(apiKey || config.modelKey)
+    const hasKey = !!(apiKey || (savedKeyFitsProvider(provider, config) ? config.modelKey : null))
     // __custom__ is always the last entry — lets users type any model not in the list
     const modelItems: SelectionItem[] = [
       ...modelList.map((id) => ({
