@@ -98,6 +98,36 @@ function safeParseJson(raw: string): Record<string, unknown> {
   }
 }
 
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', 'out'])
+
+function findFilesNamed(projectDir: string, fileName: string, maxDepth = 6): string[] {
+  const results: string[] = []
+  const search = (dir: string, depth: number): void => {
+    if (depth > maxDepth || results.length >= 5) return
+    let entries: fs.Dirent[]
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      if (SKIP_DIRS.has(entry.name)) continue
+      if (entry.isDirectory()) {
+        search(path.join(dir, entry.name), depth + 1)
+      } else if (entry.name === fileName) {
+        results.push(path.relative(projectDir, path.join(dir, entry.name)))
+      }
+    }
+  }
+  search(projectDir, 0)
+  return results
+}
+
+function normalizeToRelative(projectDir: string, filePath: string): string | null {
+  if (!path.isAbsolute(filePath)) return filePath
+  const absRoot = path.resolve(projectDir)
+  const prefix = absRoot.endsWith(path.sep) ? absRoot : absRoot + path.sep
+  if (filePath === absRoot) return '.'
+  if (filePath.startsWith(prefix)) return filePath.slice(prefix.length)
+  return null
+}
+
 /**
  * Reads a file or lists a directory, enforcing that the resolved path stays
  * inside the project directory. Never throws — returns an error string instead
@@ -105,6 +135,13 @@ function safeParseJson(raw: string): Record<string, unknown> {
  */
 function readFileSafe(projectDir: string, filePath: string): string {
   try {
+    if (path.isAbsolute(filePath)) {
+      const rel = normalizeToRelative(projectDir, filePath)
+      if (rel === null) {
+        return `Error: Path "${filePath}" is outside the project directory. Use a relative path (e.g., "src/index.ts").`
+      }
+      filePath = rel
+    }
     const resolved = path.resolve(projectDir, filePath)
     if (!resolved.startsWith(path.resolve(projectDir))) {
       return 'Error: Access denied — path is outside the project directory.'
@@ -116,6 +153,15 @@ function readFileSafe(projectDir: string, filePath: string): string {
         const content = fs.readFileSync(srcResolved, 'utf-8')
         return `(Note: "${filePath}" not found; serving source equivalent "${srcGuess}" instead)\n\n` +
           (content.length > MAX_FILE_SIZE ? content.slice(0, MAX_FILE_SIZE) + `\n\n[… truncated]` : content)
+      }
+      // Fuzzy search: find files with the same basename anywhere in the project
+      const fileName = path.basename(filePath)
+      const fuzzyMatches = findFilesNamed(projectDir, fileName)
+      if (fuzzyMatches.length > 0) {
+        const suggestion = fuzzyMatches.length === 1
+          ? `\n\nFound a file with that name at: ${fuzzyMatches[0]}\nUse that path instead.`
+          : `\n\nFound files with that name at:\n${fuzzyMatches.join('\n')}\nUse the correct path instead.`
+        return `Error: File not found: ${filePath}${suggestion}`
       }
       // Auto-list parent or root directory so the model can self-correct without an extra round-trip
       const absRoot = path.resolve(projectDir)
@@ -275,7 +321,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
       isDemoProject,
     } = request
 
-    const effectiveSystemPrompt = systemPrompt ?? buildDebuggingSystemPrompt(undefined, isDemoProject)
+    const rootListing = (() => {
+      try { return fs.readdirSync(projectDir).slice(0, 60).join('\n') } catch { return '' }
+    })()
+    const basePrompt = systemPrompt ?? buildDebuggingSystemPrompt(projectDir, isDemoProject)
+    const effectiveSystemPrompt = rootListing
+      ? `${basePrompt}\n\nProject root directory listing:\n${rootListing}`
+      : basePrompt
     const allTools = [TOOL_READ_FILE, TOOL_WRITE_PATCH, ...extraTools].map(toOpenAiTool)
     const messages = buildOpenAiMessages(history, effectiveSystemPrompt)
 
@@ -325,10 +377,10 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
           yield { type: 'tool_call', id: toolCall.id, name, input }
 
-          // Ask the user before running sensitive tools
+          // Ask for confirmation in interactive chat; skip in fix flow (user already authorized)
           let approved = true
           let rejectionMessage: string | undefined
-          if (confirmToolCall && CONFIRM_REQUIRED_TOOLS.has(name)) {
+          if (confirmToolCall && !isFixFlow && CONFIRM_REQUIRED_TOOLS.has(name)) {
             yield { type: 'tool_confirm', id: toolCall.id, name, input }
             const confirmation = await confirmToolCall(toolCall.id, name, input)
             approved = confirmation.approved
@@ -380,7 +432,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
       isDemoProject,
     } = request
 
-    const effectiveSystemPrompt = systemPrompt ?? buildDebuggingSystemPrompt(projectDir, isDemoProject)
+    const rootListing = (() => {
+      try { return fs.readdirSync(projectDir).slice(0, 60).join('\n') } catch { return '' }
+    })()
+    const basePrompt = systemPrompt ?? buildDebuggingSystemPrompt(projectDir, isDemoProject)
+    const effectiveSystemPrompt = rootListing
+      ? `${basePrompt}\n\nProject root directory listing:\n${rootListing}`
+      : basePrompt
 
     // Responses API uses FunctionTool shape (not Chat Completions' ChatCompletionTool)
     const allTools = [TOOL_READ_FILE, TOOL_WRITE_PATCH, ...extraTools]
@@ -453,7 +511,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
           let approved = true
           let rejectionMessage: string | undefined
-          if (confirmToolCall && CONFIRM_REQUIRED_TOOLS.has(name)) {
+          if (confirmToolCall && !isFixFlow && CONFIRM_REQUIRED_TOOLS.has(name)) {
             yield { type: 'tool_confirm', id: callId, name, input: toolInput }
             const confirmation = await confirmToolCall(callId, name, toolInput)
             approved = confirmation.approved
@@ -559,7 +617,40 @@ export class OpenAICompatibleProvider implements LLMProvider {
     }
 
     if (name === 'write_patch') {
-      const patches = (input as { patches: FilePatch[] }).patches
+      const rawPatches = Array.isArray((input as { patches?: unknown }).patches)
+        ? ((input as { patches: FilePatch[] }).patches)
+        : []
+      if (rawPatches.length === 0) {
+        return { result: 'Error: write_patch requires a non-empty patches array.', status: 'failed' }
+      }
+      const patches = rawPatches.map((p) => {
+        const rel = normalizeToRelative(projectDir, p.filePath)
+        return rel !== null ? { ...p, filePath: rel } : p
+      })
+      const outsidePaths = patches.filter((p) => path.isAbsolute(p.filePath))
+      if (outsidePaths.length > 0) {
+        return {
+          result: `Error: patch filePath must be relative to the project root. Got absolute path(s): ${outsidePaths.map((p) => p.filePath).join(', ')}`,
+          status: 'failed',
+        }
+      }
+      // Reject patches that target non-existent files when the file exists elsewhere
+      const wrongPaths: string[] = []
+      for (const p of patches) {
+        const resolved = path.resolve(projectDir, p.filePath)
+        if (!fs.existsSync(resolved)) {
+          const matches = findFilesNamed(projectDir, path.basename(p.filePath))
+          if (matches.length > 0) {
+            wrongPaths.push(`"${p.filePath}" not found — did you mean: ${matches.join(', ')}?`)
+          }
+        }
+      }
+      if (wrongPaths.length > 0) {
+        return {
+          result: `Error: Some patch paths point to files that don't exist, but files with the same name were found elsewhere:\n${wrongPaths.join('\n')}\nRe-read those files at the correct paths, then resubmit write_patch.`,
+          status: 'failed',
+        }
+      }
       collectedPatches.push(...patches)
       return { result: `Patches recorded: ${patches.length} file(s).`, status: 'succeeded' }
     }

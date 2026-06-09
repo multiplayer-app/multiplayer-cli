@@ -528,6 +528,7 @@ export function DashboardScreen({
               demoStatus={demoState.status}
               demoUrl={demoState.url}
               demoError={demoState.error}
+              apiUrl={config.url}
               onRequestFocus={() => setFocusedPane('detail')}
               onRequestLoadMore={() =>
                 selectedDetail?.messages[0]?.id &&

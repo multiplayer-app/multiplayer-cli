@@ -31,7 +31,10 @@ const MODEL_OPTIONS = [
   { label: 'claude-opus-4-6', value: 'claude-opus-4-6' },
   { label: 'claude-haiku-4-5-20251001', value: 'claude-haiku-4-5-20251001' },
   // Codex
-  { label: 'codex-mini-latest', value: 'codex-mini-latest' },
+  { label: 'gpt-5.3-codex', value: 'gpt-5.3-codex' },
+  { label: 'gpt-5.1-codex-mini', value: 'gpt-5.1-codex-mini' },
+  { label: 'gpt-5.1-codex', value: 'gpt-5.1-codex' },
+  { label: 'gpt-5.1-codex-max', value: 'gpt-5.1-codex-max' },
   // OpenAI
   { label: 'gpt-4o', value: 'gpt-4o' },
   { label: 'gpt-4o-mini', value: 'gpt-4o-mini' },

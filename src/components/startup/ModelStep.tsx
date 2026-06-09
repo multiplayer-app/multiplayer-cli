@@ -71,7 +71,7 @@ const PROVIDERS: ProviderDef[] = [
     icon: '◈',
     iconColor: '#a78bfa',
     keyPlaceholder: 'sk-...',
-    fallbackModels: ['codex-mini-latest'],
+    fallbackModels: ['gpt-5.3-codex', 'gpt-5.1-codex-mini', 'gpt-5.1-codex', 'gpt-5.1-codex-max'],
   },
   {
     id: 'gemini',
@@ -255,7 +255,9 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
           ? await AiService.fetchAnthropicModels(key || undefined)
           : provider.id === 'gemini'
             ? await AiService.fetchGeminiModels(key)
-            : await AiService.fetchOpenAiCompatibleModels(key, provider.baseUrl)
+            : provider.id === 'codex'
+              ? await AiService.fetchCodexModels(key)
+              : await AiService.fetchOpenAiCompatibleModels(key, provider.baseUrl)
     } catch {
       ids = []
     }

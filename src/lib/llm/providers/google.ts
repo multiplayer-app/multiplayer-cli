@@ -91,13 +91,21 @@ function buildGeminiContents(
     }
   }
 
-  // Gemini requires strictly alternating user/model turns. Skipping empty
-  // messages can leave consecutive same-role turns, so merge them.
+  // Gemini requires strictly alternating user/model turns.
+  // - Consecutive model turns: merge their parts.
+  // - Consecutive user turns: the missing assistant turn had only tool calls
+  //   with no text and was not stored in history. Insert a placeholder so
+  //   Gemini sees a valid alternating sequence.
   const contents: Content[] = []
   for (const entry of raw) {
     const prev = contents[contents.length - 1]
     if (prev && prev.role === entry.role) {
-      prev.parts = [...(prev.parts ?? []), ...(entry.parts ?? [])]
+      if (entry.role === 'model') {
+        prev.parts = [...(prev.parts ?? []), ...(entry.parts ?? [])]
+      } else {
+        contents.push({ role: 'model', parts: [{ text: '(Tool calls made, no text response)' }] })
+        contents.push({ ...entry })
+      }
     } else {
       contents.push({ ...entry })
     }
@@ -108,8 +116,45 @@ function buildGeminiContents(
 
 // ─── File utilities (same as OpenAI provider) ─────────────────────────────────
 
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', 'out'])
+
+function findFilesNamed(projectDir: string, fileName: string, maxDepth = 6): string[] {
+  const results: string[] = []
+  const search = (dir: string, depth: number): void => {
+    if (depth > maxDepth || results.length >= 5) return
+    let entries: fs.Dirent[]
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      if (SKIP_DIRS.has(entry.name)) continue
+      if (entry.isDirectory()) {
+        search(path.join(dir, entry.name), depth + 1)
+      } else if (entry.name === fileName) {
+        results.push(path.relative(projectDir, path.join(dir, entry.name)))
+      }
+    }
+  }
+  search(projectDir, 0)
+  return results
+}
+
+function normalizeToRelative(projectDir: string, filePath: string): string | null {
+  if (!path.isAbsolute(filePath)) return filePath
+  const absRoot = path.resolve(projectDir)
+  const prefix = absRoot.endsWith(path.sep) ? absRoot : absRoot + path.sep
+  if (filePath === absRoot) return '.'
+  if (filePath.startsWith(prefix)) return filePath.slice(prefix.length)
+  return null
+}
+
 function readFileSafe(projectDir: string, filePath: string): string {
   try {
+    if (path.isAbsolute(filePath)) {
+      const rel = normalizeToRelative(projectDir, filePath)
+      if (rel === null) {
+        return `Error: Path "${filePath}" is outside the project directory. Use a relative path (e.g., "src/index.ts").`
+      }
+      filePath = rel
+    }
     const resolved = path.resolve(projectDir, filePath)
     if (!resolved.startsWith(path.resolve(projectDir))) {
       return 'Error: Access denied — path is outside the project directory.'
@@ -122,9 +167,28 @@ function readFileSafe(projectDir: string, filePath: string): string {
       if (srcGuess !== filePath && fs.existsSync(srcResolved)) {
         const content = fs.readFileSync(srcResolved, 'utf-8')
         return `(Note: "${filePath}" not found; serving source equivalent "${srcGuess}" instead)\n\n` +
-          (content.length > MAX_FILE_SIZE ? content.slice(0, MAX_FILE_SIZE) + `\n\n[… truncated]` : content)
+          (content.length > MAX_FILE_SIZE ? content.slice(0, MAX_FILE_SIZE) + '\n\n[… truncated]' : content)
       }
-      return `Error: File not found: ${filePath}\nThe project root is: ${projectDir}\nPaths must be relative to this root. Call read_file on a parent directory (e.g. "." or "src") to list available files.`
+      // Fuzzy search: find files with the same basename anywhere in the project
+      const fileName = path.basename(filePath)
+      const fuzzyMatches = findFilesNamed(projectDir, fileName)
+      if (fuzzyMatches.length > 0) {
+        const suggestion = fuzzyMatches.length === 1
+          ? `\n\nFound a file with that name at: ${fuzzyMatches[0]}\nUse that path instead.`
+          : `\n\nFound files with that name at:\n${fuzzyMatches.join('\n')}\nUse the correct path instead.`
+        return `Error: File not found: ${filePath}${suggestion}`
+      }
+      // Auto-list parent or root directory so the model can self-correct without an extra round-trip
+      const absRoot = path.resolve(projectDir)
+      const parentDir = path.dirname(filePath)
+      const parentResolved = path.resolve(projectDir, parentDir)
+      let listing = ''
+      if (parentDir !== '.' && fs.existsSync(parentResolved) && fs.statSync(parentResolved).isDirectory()) {
+        listing = `\n\nContents of "${parentDir}":\n${fs.readdirSync(parentResolved).slice(0, 50).join('\n')}`
+      } else {
+        listing = `\n\nProject root contents:\n${fs.readdirSync(absRoot).slice(0, 50).join('\n')}`
+      }
+      return `Error: File not found: ${filePath}\nThe project root is: ${absRoot}\nPaths must be relative to this root.${listing}`
     }
     const stat = fs.statSync(resolved)
     if (stat.isDirectory()) {
@@ -201,7 +265,13 @@ export class GoogleAIProvider implements LLMProvider {
       isDemoProject,
     } = request
 
-    const effectiveSystemPrompt = systemPrompt ?? buildDebuggingSystemPrompt(projectDir, isDemoProject)
+    const rootListing = (() => {
+      try { return fs.readdirSync(projectDir).slice(0, 60).join('\n') } catch { return '' }
+    })()
+    const basePrompt = systemPrompt ?? buildDebuggingSystemPrompt(projectDir, isDemoProject)
+    const effectiveSystemPrompt = rootListing
+      ? `${basePrompt}\n\nProject root directory listing:\n${rootListing}`
+      : basePrompt
     const allTools = [TOOL_READ_FILE, TOOL_WRITE_PATCH, ...extraTools]
     const toolDeclarations = allTools.map((t) => ({
       name: t.name,
@@ -213,6 +283,7 @@ export class GoogleAIProvider implements LLMProvider {
     const collectedPatches: FilePatch[] = []
     let filesRead = 0
     let finalText = ''
+    let toolCallCounter = 0
 
     try {
       for (let turn = 0; turn < 20; turn++) {
@@ -223,7 +294,9 @@ export class GoogleAIProvider implements LLMProvider {
 
         yield { type: 'turn_start' }
 
-        const stream = await this.genai.models.generateContentStream({
+        // Use non-streaming generateContent to avoid chunk-boundary issues
+        // where function call parts can be split across streaming chunks.
+        const response = await this.genai.models.generateContent({
           model: this.model,
           contents,
           config: {
@@ -232,26 +305,16 @@ export class GoogleAIProvider implements LLMProvider {
           },
         })
 
-        // Collect streamed text and function calls
-        const functionCalls: FunctionCall[] = []
-        let turnText = ''
+        if (abortSignal?.aborted) {
+          yield { type: 'aborted' }
+          return
+        }
 
-        for await (const chunk of stream) {
-          if (abortSignal?.aborted) {
-            yield { type: 'aborted' }
-            return
-          }
-
-          const text = chunk.text ?? ''
-          if (text) {
-            finalText += text
-            turnText += text
-            yield { type: 'text_delta', text }
-          }
-
-          for (const fc of chunk.functionCalls ?? []) {
-            functionCalls.push(fc)
-          }
+        const functionCalls: FunctionCall[] = response.functionCalls ?? []
+        const turnText = response.text ?? ''
+        if (turnText) {
+          finalText += turnText
+          yield { type: 'text_delta', text: turnText }
         }
 
         // Append model turn to history
@@ -270,14 +333,14 @@ export class GoogleAIProvider implements LLMProvider {
         const responseParts: Part[] = []
 
         for (const fc of functionCalls) {
-          const toolId = fc.id ?? fc.name ?? 'unknown'
           const name = fc.name ?? 'unknown'
+          const toolId = fc.id ?? `${name}-${++toolCallCounter}`
           const input = (fc.args ?? {}) as Record<string, unknown>
 
           // Confirmation for write_patch
           let approved = true
           let rejectionMessage: string | undefined
-          if (confirmToolCall && name === 'write_patch') {
+          if (confirmToolCall && !isFixFlow && name === 'write_patch') {
             yield { type: 'tool_confirm', id: toolId, name, input }
             const result = await confirmToolCall(toolId, name, input)
             approved = result.approved
@@ -302,10 +365,43 @@ export class GoogleAIProvider implements LLMProvider {
               if (status === 'succeeded') filesRead++
             }
           } else if (name === 'write_patch') {
-            const patches = (input as { patches: FilePatch[] }).patches
-            collectedPatches.push(...patches)
-            output = `Patches recorded: ${patches.length} file(s).`
-            status = 'succeeded'
+            const rawPatches = (input as { patches?: unknown }).patches
+            const rawArray = Array.isArray(rawPatches) ? (rawPatches as FilePatch[]) : []
+            if (rawArray.length === 0) {
+              output = 'Error: write_patch requires a non-empty patches array.'
+              status = 'failed'
+            } else {
+              // Normalize absolute patch paths to relative so worktree paths don't fail security check
+              const patches = rawArray.map((p) => {
+                const rel = normalizeToRelative(projectDir, p.filePath)
+                return rel !== null ? { ...p, filePath: rel } : p
+              })
+              const outsidePaths = patches.filter((p) => path.isAbsolute(p.filePath))
+              if (outsidePaths.length > 0) {
+                output = `Error: patch filePath must be relative to the project root. Got absolute path(s): ${outsidePaths.map((p) => p.filePath).join(', ')}`
+                status = 'failed'
+              } else {
+                // Warn if a patch targets a non-existent file but a fuzzy match exists elsewhere
+                const wrongPaths: string[] = []
+                for (const p of patches) {
+                  const resolved = path.resolve(projectDir, p.filePath)
+                  if (!fs.existsSync(resolved)) {
+                    const matches = findFilesNamed(projectDir, path.basename(p.filePath))
+                    if (matches.length > 0) {
+                      wrongPaths.push(`"${p.filePath}" not found — did you mean: ${matches.join(', ')}?`)
+                    }
+                  }
+                }
+                if (wrongPaths.length > 0) {
+                  output = `Error: Some patch paths point to files that don't exist, but files with the same name were found elsewhere:\n${wrongPaths.join('\n')}\nRe-read those files at the correct paths, then resubmit write_patch.`
+                  status = 'failed'
+                } else {
+                  collectedPatches.push(...patches)
+                  output = `Patches recorded: ${patches.length} file(s).`
+                  status = 'succeeded'
+                }
+              }
+            }
           } else {
             const handler = extraToolHandlers[name]
             if (handler) {
@@ -326,7 +422,7 @@ export class GoogleAIProvider implements LLMProvider {
 
           responseParts.push({
             functionResponse: {
-              id: fc.id,
+              ...(fc.id != null ? { id: fc.id } : {}),
               name,
               response: { output },
             },

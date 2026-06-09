@@ -263,6 +263,23 @@ export const fetchOpenAiCompatibleModels = async (apiKey: string, baseUrl?: stri
   }
 }
 
+/**
+ * Lists Codex models available for the given API key.
+ * Tries /v1/models and filters for codex-* entries; falls back to known aliases
+ * because OpenAI does not list alias models in that endpoint.
+ */
+export const fetchCodexModels = async (apiKey: string): Promise<string[]> => {
+  const KNOWN_CODEX_MODELS = ['gpt-5.3-codex', 'gpt-5.1-codex-mini', 'gpt-5.1-codex', 'gpt-5.1-codex-max']
+  try {
+    const client = new OpenAI({ apiKey })
+    const page = await client.models.list()
+    const fromApi = page.data.map((m) => m.id).filter((id) => id.includes('codex'))
+    return fromApi.length > 0 ? fromApi : KNOWN_CODEX_MODELS
+  } catch {
+    return KNOWN_CODEX_MODELS
+  }
+}
+
 export const classifyAiError = (err: unknown): string => {
   const message = err instanceof Error ? err.message : String(err)
   const lower = message.toLowerCase()
@@ -1264,6 +1281,11 @@ export const continueChat = async (
     options.isDemoProject,
     isAnthropicModel(model),
   )
+  // For non-Anthropic models (Gemini, OpenAI, Codex) in issue_fix mode,
+  // write_patch calls should actually be applied to disk. Anthropic uses
+  // its own native Edit/Write tools and doesn't go through isFixFlow.
+  const isFixFlow = options.sessionMode === 'issue_fix' && !isAnthropicModel(model)
+
   const { finalText } = await dispatchAgentEvents(
     provider.runAgentic({
       history: llmHistory,
@@ -1273,6 +1295,7 @@ export const continueChat = async (
       confirmToolCall: callbacks.confirmToolCall,
       abortSignal,
       isDemoProject: options.isDemoProject,
+      isFixFlow,
     }),
     callbacks,
   )

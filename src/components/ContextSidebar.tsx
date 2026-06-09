@@ -7,7 +7,7 @@ import type { SessionDetail, SessionStatus, RateLimitState } from '../runtime/ty
 import type { AgentChatStatus } from '../types/index.js'
 import type { GitSettings } from '../cli/profile.js'
 import { GitModeSection } from './shared/GitModeSection.js'
-import { PRODUCTION_HOSTNAME, PRODUCTION_WEB_HOSTNAME } from '../config.js'
+import { getWebBaseUrl } from '../config.js'
 import type { DemoStatus } from '../lib/demoProcess.js'
 import {
   ACCENT,
@@ -115,16 +115,6 @@ function timeAgo(date: Date): string {
   return `${hours}h ago`
 }
 
-function getWebBaseUrl(apiUrl?: string): string {
-  if (!apiUrl) return `https://${PRODUCTION_WEB_HOSTNAME}`
-  try {
-    const { hostname } = new URL(apiUrl)
-    if (hostname === PRODUCTION_HOSTNAME) return `https://${PRODUCTION_WEB_HOSTNAME}`
-    return new URL(apiUrl).origin
-  } catch {
-    return `https://${PRODUCTION_WEB_HOSTNAME}`
-  }
-}
 
 const getBrowserUrl = (
   workspaceId?: string,

@@ -496,7 +496,7 @@ When analyzing an issue:
 
 Work autonomously. Do not ask the user for clarification or confirmation — just analyze, read files, and call write_patch with the fix. Always call write_patch at the end with the complete list of patches needed.
 
-IMPORTANT: Always read source files (src/, lib/, etc.), never dist/ or build/ directories — those are compiled outputs that do not exist in the working tree. If a path is not found, call read_file on a parent directory to discover the actual file layout.${dirNote}${demoNote}`
+IMPORTANT: Always read source files, never dist/ or build/ directories — those are compiled outputs. Use the project root directory listing to discover the actual source structure before reading files. If a path is not found, call read_file on a parent directory to list contents and find the correct path.${dirNote}${demoNote}`
 }
 
 /** System prompt for the Claude Code path (uses native Read / Edit / Write tools). */
