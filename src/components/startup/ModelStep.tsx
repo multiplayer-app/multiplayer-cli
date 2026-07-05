@@ -15,8 +15,8 @@
 import { useState, useEffect, useCallback, type ReactElement } from 'react'
 import type { KeyEvent } from '@opentui/core'
 import { InputSubmitPayload, stringFromInputSubmit } from '../../lib/inputSubmit.js'
+import { useLayerKeys } from '../../lib/focus/index.js'
 import { tuiAttrs } from '../../lib/tuiAttrs.js'
-import { useKeyboard } from '@opentui/react'
 import * as AiService from '../../services/ai.service.js'
 import type { AgentConfig } from '../../types/index.js'
 import { FooterHints, InputField, SelectionList, type SelectionItem } from '../shared/index.js'
@@ -462,26 +462,39 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
   }
 
   // ── Keyboard ──────────────────────────────────────────────────────────────
+  // Layer-scoped: inside ModelPanel this runs before the modal's Escape-dismiss,
+  // so Esc walks sub-steps back and only closes the modal from the provider list
+  // (via onBack). In the setup wizard it behaves like the old global handler.
 
-  useKeyboard((key: KeyEvent) => {
+  useLayerKeys((key: KeyEvent): boolean => {
     const { name } = key
 
     if (subStep === 'provider') {
       if (name === 'up') {
         setProviderIndex((i) => Math.max(0, i - 1))
-      } else if (name === 'down') {
+        return true
+      }
+      if (name === 'down') {
         setProviderIndex((i) => Math.min(PROVIDERS.length - 1, i + 1))
-      } else if (name === 'return') {
+        return true
+      }
+      if (name === 'return') {
         const p = PROVIDERS[providerIndex]
         if (p) selectProvider(p)
-      } else if (name === 'escape') {
-        key.stopPropagation()
-        onBack?.()
-      } else if ((name === 'r' || name === 'R') && loginError) {
-        runDetection()
-        key.stopPropagation()
+        return true
       }
-      return
+      if (name === 'escape') {
+        // Only claim Esc if we can act on it; otherwise let it fall through to
+        // the host's back handler (modal dismiss / wizard flow goBack).
+        if (!onBack) return false
+        onBack()
+        return true
+      }
+      if ((name === 'r' || name === 'R') && loginError) {
+        runDetection()
+        return true
+      }
+      return false
     }
 
     if (subStep === 'model') {
@@ -489,16 +502,22 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
       const total = modelList.length + 1
       if (name === 'up') {
         setModelIndex((i) => Math.max(0, i - 1))
-      } else if (name === 'down') {
+        return true
+      }
+      if (name === 'down') {
         setModelIndex((i) => Math.min(total - 1, i + 1))
-      } else if (name === 'return') {
+        return true
+      }
+      if (name === 'return') {
         const id = modelIndex < modelList.length ? modelList[modelIndex]! : '__custom__'
         selectModel(id)
-      } else if (name === 'escape') {
-        setSubStep('provider')
-        key.stopPropagation()
+        return true
       }
-      return
+      if (name === 'escape') {
+        setSubStep('provider')
+        return true
+      }
+      return false
     }
 
     // All other sub-steps: ESC goes back one level
@@ -508,8 +527,9 @@ export function ModelStep({ config, onComplete, onBack }: Props): ReactElement |
       else if (subStep === 'api-url') setSubStep(pendingModelId && modelList.includes(pendingModelId) ? 'model' : 'custom-model')
       setApiKeyError(null)
       setCustomModelError(null)
-      key.stopPropagation()
+      return true
     }
+    return false
   })
 
   // ── Render ────────────────────────────────────────────────────────────────

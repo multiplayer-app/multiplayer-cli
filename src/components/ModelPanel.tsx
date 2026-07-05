@@ -1,6 +1,6 @@
-import { useCallback, type ReactElement } from 'react'
-import { MouseButton, type KeyEvent, type MouseEvent } from '@opentui/core'
-import { useKeyboard, useTerminalDimensions } from '@opentui/react'
+import type { ReactElement } from 'react'
+import { MouseButton, type MouseEvent } from '@opentui/core'
+import { useTerminalDimensions } from '@opentui/react'
 import { tuiAttrs } from '../lib/tuiAttrs.js'
 import type { AgentConfig } from '../types/index.js'
 import { ModelStep } from './startup/ModelStep.js'
@@ -20,19 +20,9 @@ interface Props {
 export function ModelPanel({ config, onApply, onClose }: Props): ReactElement {
   const { width, height } = useTerminalDimensions()
 
-  // ModelStep doesn't handle Escape, so the modal owns close-on-Escape.
-  useKeyboard(
-    useCallback(
-      (key: KeyEvent) => {
-        if (key.name === 'escape') {
-          onClose()
-          key.stopPropagation()
-        }
-      },
-      [onClose],
-    ),
-  )
-
+  // Escape is handled by ModelStep's layer keys: it walks sub-steps back and
+  // calls onBack (= onClose) from the provider list. The FocusLayer's
+  // onDismiss covers any Escape ModelStep leaves unhandled.
   const dialogWidth = Math.min(76, width - 4)
   const modalMaxHeight = Math.max(14, height - 4)
 
@@ -83,6 +73,7 @@ export function ModelPanel({ config, onApply, onClose }: Props): ReactElement {
         <box marginTop={1} flexGrow={1} flexShrink={1} minHeight={0} overflow='hidden'>
           <ModelStep
             config={config}
+            onBack={onClose}
             onComplete={(updates) => {
               onApply(updates)
               onClose()

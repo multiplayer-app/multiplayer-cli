@@ -1,30 +1,36 @@
 import type { ReactElement } from 'react'
-import type { MouseEvent } from '@opentui/core'
-import { MouseButton } from '@opentui/core'
+import { useFocusZone } from '../lib/focus/index.js'
+import { clickHandler } from './shared/clickHandler.js'
 import { tuiAttrs } from '../lib/tuiAttrs.js'
 import { LogOutput } from './LogOutput.js'
 import type { LogEntry } from '../types/index.js'
 import { BORDER_MUTED, SEM_VIOLET_SOFT } from './shared/tuiTheme.js'
 
+const LOGS_ZONE_HINTS = [{ id: 'scroll', keys: '↑↓', label: 'scroll' }] as const
+
 interface Props {
   logs: LogEntry[]
   height: number
-  isFocused: boolean
-  onRequestFocus: () => void
+  /** Escape while focused (dashboard supplies narrow-aware back-to-list). */
+  onEscape?: () => boolean
 }
 
-function LogsDockImpl({ logs, height, isFocused, onRequestFocus }: Props): ReactElement {
-  const handleMouseUp = (e: MouseEvent) => {
-    if (e.button !== MouseButton.LEFT) return
-    e.stopPropagation()
-    onRequestFocus()
-  }
+function LogsDockImpl({ logs, height, onEscape }: Props): ReactElement {
+  const { isActive, focus } = useFocusZone({
+    id: 'logs',
+    order: 4,
+    fallbackZone: 'list',
+    onEscape,
+    hints: LOGS_ZONE_HINTS
+  })
+
+  const handleMouseUp = clickHandler(focus)
 
   return (
     <box
       border={true}
       borderStyle='rounded'
-      borderColor={isFocused ? SEM_VIOLET_SOFT : BORDER_MUTED}
+      borderColor={isActive ? SEM_VIOLET_SOFT : BORDER_MUTED}
       padding={1}
       flexShrink={0}
       flexDirection='column'
@@ -38,7 +44,7 @@ function LogsDockImpl({ logs, height, isFocused, onRequestFocus }: Props): React
       <scrollbox
         flexGrow={1}
         scrollY
-        focused={isFocused}
+        focused={isActive}
         stickyScroll
         stickyStart='bottom'
         onMouseUp={handleMouseUp}

@@ -4,6 +4,7 @@ import { useKeyboard, useTerminalDimensions } from '@opentui/react'
 import { DashboardScreen } from './components/screens/DashboardScreen.js'
 import { QuitScreen } from './components/screens/QuitScreen.js'
 import { StartupScreen } from './components/screens/StartupScreen.js'
+import { FocusLayer } from './lib/focus/index.js'
 import { RuntimeController } from './runtime/controller.js'
 import { clearCredentials, type GitSettings } from './cli/profile.js'
 import { deleteProfileTokenData } from './auth/token-store.js'
@@ -317,7 +318,6 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
             onUnsubscribeSession={handleUnsubscribeSession}
             onLoadMoreSessions={handleLoadMoreSessions}
             hasMoreSessions={hasMoreSessions}
-            suspendKeyboard={screen === 'quit-confirm'}
             onEmitAgentSettings={handleEmitAgentSettings}
             onUpdateGitSettings={handleUpdateGitSettings}
             onUpdateModel={handleUpdateModel}
@@ -325,7 +325,9 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
           />
         </box>
         {screen === 'quit-confirm' && (
-          <QuitScreen onQuit={handleQuit} onCancel={handleQuitCancel} onRestartSetup={handleRestartSetupFromQuit} />
+          <FocusLayer id='quit' onDismiss={handleQuitCancel}>
+            <QuitScreen onQuit={handleQuit} onCancel={handleQuitCancel} onRestartSetup={handleRestartSetupFromQuit} />
+          </FocusLayer>
         )}
         {ctrlCToast}
       </box>

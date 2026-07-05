@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, type ReactElement } from 'react'
 import type { KeyEvent, MouseEvent } from '@opentui/core'
 import { MouseButton, ScrollBoxRenderable } from '@opentui/core'
-import { useKeyboard } from '@opentui/react'
+import { useZoneKeys } from '../../lib/focus/index.js'
 import { tuiAttrs } from '../../lib/tuiAttrs.js'
 import { clampTextLines, collapseForSingleLine } from '../../lib/formatDisplay.js'
 import type { SessionSummary, SessionStatus } from '../../runtime/types.js'
@@ -40,6 +40,7 @@ const STATUS_SYMBOL: Record<SessionStatus, { symbol: string; color: string }> = 
 interface Props {
   sessions: SessionSummary[]
   selectedIndex: number
+  /** Whether the 'list' focus zone (registered by DashboardScreen) is active. */
   isFocused: boolean
   /** Primary click on a row selects that session (terminal mouse reporting). */
   onSelectSession?: (index: number) => void
@@ -86,25 +87,30 @@ function SessionListPaneImpl({
     listScrollRef.current?.scrollChildIntoView(`session-list-${s.chatId}`)
   }, [selectedIndex, sessions])
 
-  /** PgUp / PgDn / Home / End scroll the list; ↑↓ stay with Dashboard for selection (scrollbox stays unfocused). */
-  useKeyboard((key: KeyEvent) => {
-    if (!isFocused || sessions.length === 0) return
+  // PgUp/PgDn/Home/End scroll the list; ↑↓/Enter selection lives with the
+  // 'list' zone's list navigation in DashboardScreen (scrollbox stays unfocused).
+  useZoneKeys('list', (key: KeyEvent) => {
+    if (sessions.length === 0) return false
     const sb = listScrollRef.current
-    if (!sb) return
+    if (!sb) return false
     const { name } = key
     if (name === 'pageup') {
       sb.scrollBy(-0.5, 'viewport')
-      key.stopPropagation()
-    } else if (name === 'pagedown') {
-      sb.scrollBy(0.5, 'viewport')
-      key.stopPropagation()
-    } else if (name === 'home') {
-      sb.scrollBy(-1, 'content')
-      key.stopPropagation()
-    } else if (name === 'end') {
-      sb.scrollBy(1, 'content')
-      key.stopPropagation()
+      return true
     }
+    if (name === 'pagedown') {
+      sb.scrollBy(0.5, 'viewport')
+      return true
+    }
+    if (name === 'home') {
+      sb.scrollBy(-1, 'content')
+      return true
+    }
+    if (name === 'end') {
+      sb.scrollBy(1, 'content')
+      return true
+    }
+    return false
   })
 
   return (
