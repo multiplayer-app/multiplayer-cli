@@ -15,7 +15,7 @@ import {
   MODAL_BACKDROP_RGBA
 } from '../shared/tuiTheme.js'
 
-type Option = QuitMode | 'cancel' | 'restart-setup'
+type Option = QuitMode | 'cancel' | 'restart-setup' | 'logout'
 
 const QUIT_BACKDROP_BG = MODAL_BACKDROP_RGBA
 
@@ -39,8 +39,14 @@ const OPTIONS: { value: Option; digit: string; label: string; description: strin
     description: 'Disconnect and run the setup wizard again from scratch'
   },
   {
-    value: 'cancel',
+    value: 'logout',
     digit: '4',
+    label: 'Log out & switch user',
+    description: 'Sign out this account, then set up again as a different user'
+  },
+  {
+    value: 'cancel',
+    digit: '5',
     label: 'Cancel',
     description: 'Return to the dashboard'
   }
@@ -50,13 +56,15 @@ interface Props {
   onQuit: (mode: QuitMode) => void
   onCancel: () => void
   onRestartSetup: () => void
+  onLogout: () => void
 }
 
 function applyOption(
   opt: (typeof OPTIONS)[number],
   onQuit: (mode: QuitMode) => void,
   onCancel: () => void,
-  onRestartSetup: () => void
+  onRestartSetup: () => void,
+  onLogout: () => void
 ): void {
   if (opt.value === 'cancel') {
     onCancel()
@@ -66,15 +74,19 @@ function applyOption(
     onRestartSetup()
     return
   }
+  if (opt.value === 'logout') {
+    onLogout()
+    return
+  }
   onQuit(opt.value)
 }
 
-export function QuitScreen({ onQuit, onCancel, onRestartSetup }: Props): ReactElement {
+export function QuitScreen({ onQuit, onCancel, onRestartSetup, onLogout }: Props): ReactElement {
   const { width, height } = useTerminalDimensions()
 
   const runOption = (index: number) => {
     const opt = OPTIONS[index]
-    if (opt) applyOption(opt, onQuit, onCancel, onRestartSetup)
+    if (opt) applyOption(opt, onQuit, onCancel, onRestartSetup, onLogout)
   }
 
   // Registers on the 'quit' FocusLayer (App.tsx); Escape = layer dismiss.
@@ -187,7 +199,7 @@ export function QuitScreen({ onQuit, onCancel, onRestartSetup }: Props): ReactEl
           </text>
           <text attributes={tuiAttrs({ dim: true })}> select · </text>
           <text fg={ACCENT} attributes={tuiAttrs({ bold: true })}>
-            1-4
+            1-5
           </text>
           <text attributes={tuiAttrs({ dim: true })}> quick pick · Esc cancel</text>
         </box>

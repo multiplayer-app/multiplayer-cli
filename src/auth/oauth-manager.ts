@@ -102,6 +102,11 @@ export class OAuthManager {
   private _callbackResolve: (() => void) | undefined
   private _callbackReject: ((err: Error) => void) | undefined
   private _callbackDone: Promise<void> | undefined
+  // Guards against a double code exchange within one authenticate() session.
+  // The browser (localhost redirect) and the manual paste both race to redeem
+  // the same authorization code; whichever wins sets this so the loser doesn't
+  // 401 on an already-consumed code and show a bogus "Authentication failed".
+  private _tokenExchanged = false
 
   constructor(profileName = 'default') {
     this.profileName = profileName
@@ -222,6 +227,7 @@ export class OAuthManager {
     onUrls?: (browserUrl: string, fallbackUrl: string) => void,
     fallbackRedirectUri?: string,
   ): Promise<void> {
+    this._tokenExchanged = false
     const clientData = await this.getClientCredentials()
     const { clientId, redirectUri } = clientData
     const authClientParams = this.tokenStore.generateAuthParams()
@@ -277,6 +283,12 @@ export class OAuthManager {
       if (!authParams?.codeVerifier) throw new Error('No pending auth session — please restart authentication')
       if (!clientData?.fallbackRedirectUri) throw new Error('No OAuth client configured for manual auth')
 
+      // The browser localhost callback may have already redeemed the code.
+      if (this._tokenExchanged) {
+        this._callbackResolve?.()
+        return
+      }
+
       const tokenParams = new URLSearchParams({
         grant_type: 'authorization_code',
         code,
@@ -293,6 +305,7 @@ export class OAuthManager {
         oauthRefreshToken: tokenData.refresh_token,
         accessTokenExpiresAt: Date.now() + tokenData.expires_in * 1000,
       })
+      this._tokenExchanged = true
       void this.stopCallbackServer()
       this._callbackResolve?.()
     } catch (err) {
@@ -341,10 +354,19 @@ export class OAuthManager {
           res.end(oauthSuccessHtml)
           this._callbackResolve?.()
         } catch (err: unknown) {
-          res.writeHead(400, { 'Content-Type': 'text/html' })
-          const errorMessage = escapeHtml(err instanceof Error ? err.message : String(err))
-          res.end(oauthFailedHtml.replace('{{error}}', errorMessage))
-          this._callbackReject?.(err instanceof Error ? err : new Error(String(err)))
+          // If login already succeeded via the manual-paste path, the code is
+          // now consumed and this exchange 401s — but the user is authenticated,
+          // so show success rather than a misleading failure page.
+          if (this._tokenExchanged) {
+            res.writeHead(200, { 'Content-Type': 'text/html' })
+            res.end(oauthSuccessHtml)
+            this._callbackResolve?.()
+          } else {
+            res.writeHead(400, { 'Content-Type': 'text/html' })
+            const errorMessage = escapeHtml(err instanceof Error ? err.message : String(err))
+            res.end(oauthFailedHtml.replace('{{error}}', errorMessage))
+            this._callbackReject?.(err instanceof Error ? err : new Error(String(err)))
+          }
         } finally {
           await this.stopCallbackServer()
         }
@@ -368,6 +390,9 @@ export class OAuthManager {
 
     if (state !== authParams?.state) throw new Error('Invalid state parameter')
     if (!authParams?.codeVerifier) throw new Error('Missing code verifier')
+
+    // The manual-paste path may have already redeemed the code this session.
+    if (this._tokenExchanged) return
 
     const tokenParams = new URLSearchParams({
       grant_type: 'authorization_code',
@@ -398,6 +423,7 @@ export class OAuthManager {
       oauthRefreshToken: tokenData.refresh_token,
       accessTokenExpiresAt: Date.now() + tokenData.expires_in * 1000,
     })
+    this._tokenExchanged = true
   }
 
   /**

@@ -23,7 +23,7 @@ interface Props {
   initialConfig: Partial<AgentConfig>
   profileName?: string
   authErrorMessage?: string | null
-  onComplete: (config: AgentConfig) => void
+  onComplete: (config: AgentConfig, accountName?: string) => void
 }
 
 export function StartupScreen({

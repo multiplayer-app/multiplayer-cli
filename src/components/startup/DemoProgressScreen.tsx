@@ -11,11 +11,11 @@ import { createApiService } from '../../services/api.service.js'
 import * as AiService from '../../services/ai.service.js'
 import { listAccounts, readCredentials, writeCredentials, renameAccount } from '../../cli/profile.js'
 import { deleteProfileTokenData } from '../../auth/token-store.js'
-import { copyToClipboard } from '../../lib/clipboard.js'
 import { tuiAttrs } from '../../lib/tuiAttrs.js'
 import { FooterHints, InputField, StatusIcon } from '../shared/index.js'
 import { clickHandler } from '../shared/clickHandler.js'
 import { stringFromInputSubmit } from '../../lib/inputSubmit.js'
+import { OAuthFallback } from './OAuthFallback.js'
 import type { SelectableWorkspace } from './ProjectSelectStep.js'
 
 const execFileAsync = promisify(execFile)
@@ -151,8 +151,6 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
   // ── OAuth UI state ───────────────────────────────────────────────────────────
 
   const [oauthFallbackUrl, setOauthFallbackUrl] = useState<string | null>(null)
-  const [urlCopied, setUrlCopied] = useState(false)
-  const [manualToken, setManualToken] = useState('')
 
   // ── Account picker state (null = not picking) ────────────────────────────────
 
@@ -168,18 +166,11 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
   // ── Refs ─────────────────────────────────────────────────────────────────────
 
   const oauthManagerRef = useRef<OAuthManager | null>(null)
-  const urlCopiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const cloneStartedRef = useRef(cloneAlreadyDone)
   const authStartedRef = useRef(false)
   const projectStartedRef = useRef(false)
   const modelStartedRef = useRef(false)
   const authDirRef = useRef<string>(initialConfig.dir ?? DEMO_DIR)
-
-  useEffect(() => {
-    return () => {
-      if (urlCopiedTimerRef.current) clearTimeout(urlCopiedTimerRef.current)
-    }
-  }, [])
 
   // ── Phase 1: Clone ───────────────────────────────────────────────────────────
 
@@ -249,7 +240,6 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
   const runFreshOAuth = useCallback(
     (dir: string, profile: string) => {
       setOauthFallbackUrl(null)
-      setManualToken('')
       setAuthPhase({ status: 'running', detail: 'Connecting…' })
 
       let cancelled = false
@@ -371,10 +361,9 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
 
     if (oauthAccounts.length === 0) {
       runFreshOAuth(clonedDir, profile)
-    } else if (oauthAccounts.length === 1) {
-      setAuthPhase({ status: 'running', detail: 'Connecting…' })
-      void tryExistingAccount(oauthAccounts[0]!, clonedDir, profile)
     } else {
+      // Always let the user choose — even with a single saved account — so they
+      // can start the demo as a different user via "Login with new account".
       setAccountOptions([...oauthAccounts, '__new__'])
       setAuthPhase({ status: 'waiting', detail: 'Select account' })
     }
@@ -561,14 +550,6 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
     [accountOptions, profileName, runFreshOAuth, tryExistingAccount]
   )
 
-  const handleCopyUrl = useCallback(() => {
-    if (!oauthFallbackUrl) return
-    copyToClipboard(oauthFallbackUrl)
-    setUrlCopied(true)
-    if (urlCopiedTimerRef.current) clearTimeout(urlCopiedTimerRef.current)
-    urlCopiedTimerRef.current = setTimeout(() => setUrlCopied(false), 3000)
-  }, [oauthFallbackUrl])
-
   const handleManualTokenSubmit = useCallback((token: string) => {
     const trimmed = token.trim()
     if (!trimmed || !oauthManagerRef.current) return
@@ -617,28 +598,7 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
         <box flexDirection='column' gap={1} paddingLeft={4}>
           <text fg='#10b981'>✓ Browser opened — complete login in your browser.</text>
           {oauthFallbackUrl && (
-            <box flexDirection='column' gap={1}>
-              <text attributes={tuiAttrs({ dim: true })}>If browser didn't open, visit:</text>
-              <text fg='#22d3ee' attributes={tuiAttrs({ underline: true })}>
-                {oauthFallbackUrl}
-              </text>
-              <box>
-                {urlCopied ? (
-                  <text fg='#10b981'>✓ Copied</text>
-                ) : (
-                  <text fg='#22d3ee' onMouseUp={clickHandler(handleCopyUrl)}>
-                    Copy URL
-                  </text>
-                )}
-              </box>
-              <text attributes={tuiAttrs({ dim: true })}>Or paste the code here:</text>
-              <InputField
-                value={manualToken}
-                onInput={setManualToken}
-                onSubmit={(p) => handleManualTokenSubmit(stringFromInputSubmit(p, manualToken))}
-                placeholder='Paste code here…'
-              />
-            </box>
+            <OAuthFallback url={oauthFallbackUrl} onSubmitCode={handleManualTokenSubmit} />
           )}
         </box>
       )}
@@ -681,7 +641,9 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
       <box marginTop={1}>
         {isPicking ? (
           <FooterHints hints='↑↓ navigate · Enter select · Click to select · Esc back' />
-        ) : isWaitingBrowser || isWaitingOpenAiKey ? (
+        ) : isWaitingBrowser ? (
+          <FooterHints hints={oauthFallbackUrl ? '↑↓ focus · Enter copy/submit' : 'Waiting for browser login…'} />
+        ) : isWaitingOpenAiKey ? (
           <FooterHints hints='Enter confirm · Esc cancel' />
         ) : hasError ? (
           <FooterHints hints='Esc back' />

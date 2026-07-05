@@ -158,7 +158,7 @@ interface Props {
   profileName?: string
   initialAccount?: string
   authErrorMessage?: string | null
-  onComplete: (config: AgentConfig) => void
+  onComplete: (config: AgentConfig, accountName?: string) => void
   onBackToTypeSelection: () => void
 }
 
@@ -396,7 +396,7 @@ export function RegularSetupFlow({
         <MultiplayerSdkStep config={config} onComplete={advance} onBack={goBack} />
       )}
       {step === 'connecting' && (
-        <ConnectingStep config={config as AgentConfig} onComplete={onComplete} onBack={goBack} onChangeModel={() => setStep('model')} />
+        <ConnectingStep config={config as AgentConfig} onComplete={(cfg) => onComplete(cfg, account)} onBack={goBack} onChangeModel={() => setStep('model')} />
       )}
     </SetupShell>
   ) as ReactElement

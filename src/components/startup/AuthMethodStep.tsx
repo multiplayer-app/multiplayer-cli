@@ -10,8 +10,7 @@ import { API_URL } from '../../config.js'
 import { decodeApiKeyPayload } from '../../services/radar.service.js'
 import type { SelectableWorkspace } from './ProjectSelectStep.js'
 import { FooterHints, SelectionList, InputField, type SelectionItem } from '../shared/index.js'
-import { clickHandler } from '../shared/clickHandler.js'
-import { copyToClipboard } from '../../lib/clipboard.js'
+import { OAuthFallback } from './OAuthFallback.js'
 
 type AuthMethod = 'oauth' | 'api-token'
 
@@ -54,17 +53,8 @@ export function AuthMethodStep({ config, url, profileName, oauthOnly, onComplete
   // 'idle' flash where the selection list would otherwise render.
   const [oauthState, setOAuthState] = useState<OAuthState>(oauthOnly ? 'loading' : 'idle')
   const [oauthFallbackUrl, setOAuthFallbackUrl] = useState<string | null>(null)
-  const [urlCopied, setUrlCopied] = useState(false)
-  const urlCopiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [manualToken, setManualToken] = useState('')
   const oauthManagerRef = useRef<OAuthManager | null>(null)
-
-  useEffect(() => {
-    return () => {
-      if (urlCopiedTimerRef.current) clearTimeout(urlCopiedTimerRef.current)
-    }
-  }, [])
 
   // Demo flow: skip the selection screen and kick off OAuth as soon as the
   // step mounts. The user has no API-key choice to make. `oauthOnly` is
@@ -91,8 +81,6 @@ export function AuthMethodStep({ config, url, profileName, oauthOnly, onComplete
     setSubStep('select')
     setOAuthState('idle')
     setOAuthFallbackUrl(null)
-    setManualToken('')
-    setUrlCopied(false)
     setError(null)
     setApiKeyError(null)
     setApiKeyValidating(false)
@@ -280,15 +268,6 @@ export function AuthMethodStep({ config, url, profileName, oauthOnly, onComplete
 
   // ─── Manual token (no-browser flow) ─────────────────────────────────────────
 
-  const handleCopyUrl = () => {
-    if (oauthFallbackUrl) {
-      copyToClipboard(oauthFallbackUrl)
-      setUrlCopied(true)
-      if (urlCopiedTimerRef.current) clearTimeout(urlCopiedTimerRef.current)
-      urlCopiedTimerRef.current = setTimeout(() => setUrlCopied(false), 3000)
-    }
-  }
-
   const handleManualTokenSubmit = (token: string) => {
     const trimmed = token.trim()
     if (!trimmed || !oauthManagerRef.current) return
@@ -348,34 +327,9 @@ export function AuthMethodStep({ config, url, profileName, oauthOnly, onComplete
           <text fg='#10b981'>✓ Browser opened — complete login in your browser.</text>
           <text fg='#f59e0b'>◌ Waiting for authentication...</text>
           {oauthFallbackUrl && (
-            <box flexDirection='column' gap={1}>
-              <box flexDirection='column' gap={0}>
-                <text attributes={tuiAttrs({ dim: true })}>
-                  If the browser did not open, visit this URL and copy the code shown:
-                </text>
-                <text fg='#22d3ee' attributes={tuiAttrs({ underline: true })}>
-                  {oauthFallbackUrl}
-                </text>
-                <box flexDirection='row' gap={1} marginTop={1}>
-                  {urlCopied ? (
-                    <text fg='#10b981'>✓ URL copied to clipboard</text>
-                  ) : (
-                    <text fg='#22d3ee' onMouseUp={clickHandler(handleCopyUrl)}>
-                      Copy URL
-                    </text>
-                  )}
-                </box>
-              </box>
-              <text attributes={tuiAttrs({ dim: true })}>Or paste the code here:</text>
-              <InputField
-                value={manualToken}
-                onInput={(v) => setManualToken(v)}
-                onSubmit={(p) => handleManualTokenSubmit(stringFromInputSubmit(p, manualToken))}
-                placeholder='Paste code here...'
-              />
-            </box>
+            <OAuthFallback url={oauthFallbackUrl} onSubmitCode={handleManualTokenSubmit} />
           )}
-          <FooterHints hints='Enter confirm · Esc back' />
+          <FooterHints hints={oauthFallbackUrl ? '↑↓ focus · Enter copy/submit · Esc back' : 'Enter confirm · Esc back'} />
         </box>
       )}
 

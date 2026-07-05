@@ -10,7 +10,7 @@ import { clearCredentials, type GitSettings } from './cli/profile.js'
 import { deleteProfileTokenData } from './auth/token-store.js'
 import { setTuiSink } from './lib/tuiSink.js'
 import { demoProcess, installDemoProcessExitHandler } from './lib/demoProcess.js'
-import { refreshOAuthTokenIfNeeded } from './services/auth.service.js'
+import { refreshOAuthTokenIfNeeded, logout as logoutAccount } from './services/auth.service.js'
 import type { AgentChatStatus, AgentConfig, LogEntry, IAgent } from './types/index.js'
 import type { QuitMode, RuntimeState, SessionDetail } from './runtime/types.js'
 
@@ -64,6 +64,10 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
   const [hasMoreSessions, setHasMoreSessions] = useState(false)
   const [authErrorMessage, setAuthErrorMessage] = useState<string | null>(null)
   const controllerRef = useRef<RuntimeController | null>(null)
+  // Account key of the logged-in session. Starts as the CLI profile, then is
+  // upgraded to the resolved account (usually the user's email) once setup
+  // completes — so logout/auth-error target the right credentials entry.
+  const activeAccountRef = useRef<string>(profileName ?? 'default')
 
   const appendLog = useCallback((level: LogEntry['level'], msg: string) => {
     setAgentLogs((prev) => {
@@ -85,9 +89,20 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
     }
   }, [])
 
+  /** Tear down the running controller and clear all per-session UI state. */
+  const teardownRuntime = useCallback(() => {
+    controllerRef.current?.disconnect()
+    controllerRef.current = null
+    setRuntimeState(null)
+    setSessionDetails(new Map())
+    setChatStatuses(new Map())
+    setHasMoreSessions(false)
+    setAgentLogs([])
+  }, [])
+
   const handleAuthError = useCallback(
     (reason: string) => {
-      const profile = profileName ?? 'default'
+      const profile = activeAccountRef.current
       try {
         deleteProfileTokenData(profile)
       } catch {
@@ -99,14 +114,8 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
         /* best-effort */
       }
 
-      controllerRef.current?.disconnect()
-      controllerRef.current = null
+      teardownRuntime()
 
-      setRuntimeState(null)
-      setSessionDetails(new Map())
-      setChatStatuses(new Map())
-      setHasMoreSessions(false)
-      setAgentLogs([])
       setStartupConfig((c) => ({
         ...c,
         apiKey: undefined,
@@ -119,11 +128,37 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
       setAuthErrorMessage(reason)
       setScreen('startup')
     },
-    [profileName]
+    [teardownRuntime]
   )
 
+  /**
+   * Log out the active account: clear its stored credentials + OAuth tokens,
+   * then drop back to the setup wizard from scratch so the user can start the
+   * demo (or a regular project) as a different user.
+   */
+  const handleLogout = useCallback(() => {
+    try {
+      logoutAccount(activeAccountRef.current)
+    } catch {
+      /* best-effort — still return to setup */
+    }
+    activeAccountRef.current = profileName ?? 'default'
+
+    teardownRuntime()
+
+    // A from-scratch wizard run: keep only environment-level fields (url, name)
+    // so every step is shown again and no cached account/token is reused.
+    setStartupConfig({
+      url: initialConfig.url,
+      name: initialConfig.name
+    })
+    setAuthErrorMessage(null)
+    setScreen('startup')
+  }, [teardownRuntime, profileName, initialConfig.url, initialConfig.name])
+
   const handleStartupComplete = useCallback(
-    (config: AgentConfig) => {
+    (config: AgentConfig, accountName?: string) => {
+      if (accountName) activeAccountRef.current = accountName
       const getToken =
         config.authType === 'oauth'
           ? async () => (await refreshOAuthTokenIfNeeded(config.url, profileName ?? 'default')) ?? config.apiKey
@@ -173,13 +208,7 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
   }, [])
 
   const handleRestartSetupFromQuit = useCallback(() => {
-    controllerRef.current?.disconnect()
-    controllerRef.current = null
-    setRuntimeState(null)
-    setSessionDetails(new Map())
-    setChatStatuses(new Map())
-    setHasMoreSessions(false)
-    setAgentLogs([])
+    teardownRuntime()
     // "Return to setup" promises a from-scratch wizard run. If we restored the
     // fully-populated initialConfig, every step's canSkip would be satisfied
     // and StartupScreen would land directly on 'connecting' → dashboard.
@@ -191,7 +220,7 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
     })
     setAuthErrorMessage(null)
     setScreen('startup')
-  }, [initialConfig])
+  }, [teardownRuntime, initialConfig])
 
   const handleQuitCancel = useCallback(() => {
     setScreen('dashboard')
@@ -289,9 +318,9 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
           initialConfig={startupConfig}
           profileName={profileName}
           authErrorMessage={authErrorMessage}
-          onComplete={(cfg) => {
+          onComplete={(cfg, accountName) => {
             setAuthErrorMessage(null)
-            handleStartupComplete(cfg)
+            handleStartupComplete(cfg, accountName)
           }}
         />
         {ctrlCToast}
@@ -326,7 +355,7 @@ export const App: React.FC<Props> = ({ initialConfig, profileName, onExit, onReg
         </box>
         {screen === 'quit-confirm' && (
           <FocusLayer id='quit' onDismiss={handleQuitCancel}>
-            <QuitScreen onQuit={handleQuit} onCancel={handleQuitCancel} onRestartSetup={handleRestartSetupFromQuit} />
+            <QuitScreen onQuit={handleQuit} onCancel={handleQuitCancel} onRestartSetup={handleRestartSetupFromQuit} onLogout={handleLogout} />
           </FocusLayer>
         )}
         {ctrlCToast}

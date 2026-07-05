@@ -7,6 +7,8 @@ interface InputFieldProps {
   placeholder?: string
   width?: number
   borderColor?: string
+  /** Whether the underlying input captures keystrokes. Defaults to true. */
+  focused?: boolean
 }
 
 /**
@@ -19,7 +21,8 @@ export function InputField({
   onSubmit,
   placeholder,
   width,
-  borderColor = '#22d3ee'
+  borderColor = '#22d3ee',
+  focused = true
 }: InputFieldProps): ReactElement {
   return (
     <box border={true} borderStyle='rounded' borderColor={borderColor} padding={1} flexDirection='row' gap={2}>
@@ -32,7 +35,7 @@ export function InputField({
         onSubmit={onSubmit}
         placeholder={placeholder}
         focusedBackgroundColor='transparent'
-        focused={true}
+        focused={focused}
       />
     </box>
   ) as ReactElement

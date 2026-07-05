@@ -1,6 +1,6 @@
 import { OAuthManager } from '../auth/oauth-manager.js'
 import { deleteProfileTokenData } from '../auth/token-store.js'
-import { writeCredentials, renameAccount } from '../cli/profile.js'
+import { writeCredentials, renameAccount, clearCredentials } from '../cli/profile.js'
 import { createApiService } from './api.service.js'
 import { BASE_API_URL } from '../config.js'
 import { logger } from '../logger.js'
@@ -103,6 +103,10 @@ export function logout(profileName = 'default'): void {
   const oauthManager = new OAuthManager(profileName)
   oauthManager.logout()
   deleteProfileTokenData(profileName)
+  // Also drop the auth fields (apiKey/authType) from credentials.json so the
+  // account no longer shows up in listAccounts()/the account pickers — otherwise
+  // it lingers as a "logged in" OAuth entry that fails on the next token fetch.
+  clearCredentials(profileName)
   logger.info('Logged out successfully.')
 }
 
