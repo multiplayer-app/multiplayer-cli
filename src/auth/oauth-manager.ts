@@ -81,6 +81,9 @@ function openBrowser(url: string): Promise<boolean> {
   })
 }
 
+/** Grace window to keep the localhost callback server alive after a manual-paste login. */
+const CALLBACK_SHUTDOWN_GRACE_MS = 10_000
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -102,6 +105,7 @@ export class OAuthManager {
   private _callbackResolve: (() => void) | undefined
   private _callbackReject: ((err: Error) => void) | undefined
   private _callbackDone: Promise<void> | undefined
+  private _serverShutdownTimer: ReturnType<typeof setTimeout> | undefined
   // Guards against a double code exchange within one authenticate() session.
   // The browser (localhost redirect) and the manual paste both race to redeem
   // the same authorization code; whichever wins sets this so the loser doesn't
@@ -306,7 +310,11 @@ export class OAuthManager {
         accessTokenExpiresAt: Date.now() + tokenData.expires_in * 1000,
       })
       this._tokenExchanged = true
-      void this.stopCallbackServer()
+      // Keep the callback server alive briefly: if the browser also completes
+      // the localhost redirect, its request now hits the _tokenExchanged guard
+      // and gets the success page instead of a connection error. Auto-closes
+      // after the grace window if no browser callback arrives.
+      this.scheduleCallbackServerShutdown(CALLBACK_SHUTDOWN_GRACE_MS)
       this._callbackResolve?.()
     } catch (err) {
       this._callbackReject?.(err instanceof Error ? err : new Error(String(err)))
@@ -482,7 +490,23 @@ export class OAuthManager {
     }
   }
 
+  /** Close the callback server after `delayMs` unless it's stopped sooner (e.g. by a browser callback). */
+  private scheduleCallbackServerShutdown(delayMs: number): void {
+    if (this._serverShutdownTimer) clearTimeout(this._serverShutdownTimer)
+    const timer = setTimeout(() => {
+      this._serverShutdownTimer = undefined
+      void this.stopCallbackServer()
+    }, delayMs)
+    // Don't let the pending shutdown keep the process alive on its own.
+    timer.unref?.()
+    this._serverShutdownTimer = timer
+  }
+
   stopCallbackServer(): Promise<void> {
+    if (this._serverShutdownTimer) {
+      clearTimeout(this._serverShutdownTimer)
+      this._serverShutdownTimer = undefined
+    }
     return new Promise((resolve, reject) => {
       if (!this.authServer) return resolve()
       this.authServer.close(err => (err ? reject(err) : resolve()))
