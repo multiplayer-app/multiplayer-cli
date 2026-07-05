@@ -10,6 +10,7 @@ import { decodeApiKeyPayload, validateApiKey } from './services/radar.service.js
 import { refreshOAuthTokenIfNeeded } from './services/auth.service.js'
 
 import { startHealthServer } from './services/health.service.js'
+import { FocusProvider } from './lib/focus/index.js'
 import { logToTui } from './lib/tuiSink.js'
 import type { AgentConfig } from './types/index.js'
 import type { ParsedFlags } from './cli/flags.js'
@@ -105,6 +106,9 @@ runCli(process.argv, ({ mode, initialConfig, healthPort, profileName }: ParsedFl
           exitOnCtrlC: false,
           targetFps: 60,
           screenMode: 'alternate-screen',
+          // Focus is fully controlled by the FocusManager (src/lib/focus):
+          // native click-to-focus would fight the React-driven `focused` props.
+          autoFocus: false,
           // Keep 'console-overlay' so console.log/error are captured rather
           // than writing through to stdout (which would corrupt the
           // alt-screen). Disable auto-open on error: surface errors through
@@ -129,12 +133,16 @@ runCli(process.argv, ({ mode, initialConfig, healthPort, profileName }: ParsedFl
         process.on('SIGTERM', exitApp)
 
         createRoot(renderer).render(
-          React.createElement(App, {
-            initialConfig,
-            profileName,
-            onExit: exitApp,
-            onRegisterBeforeExit: (fn) => { beforeExit = fn },
-          }),
+          React.createElement(
+            FocusProvider,
+            null,
+            React.createElement(App, {
+              initialConfig,
+              profileName,
+              onExit: exitApp,
+              onRegisterBeforeExit: (fn) => { beforeExit = fn },
+            }),
+          ),
         )
 
         renderer.start()

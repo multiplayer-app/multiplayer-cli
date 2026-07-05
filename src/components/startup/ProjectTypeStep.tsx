@@ -118,17 +118,26 @@ export function ProjectTypeStep({ onComplete }: Props): ReactElement {
       onComplete({ kind: 'regular', updates: {} })
       return
     }
-    if (item.kind === 'example') {
+    // Resolve which project entry to load: an explicitly selected recent
+    // project, or — when re-selecting "Try a demo" — the most recent existing
+    // demo so we reuse it instead of cloning/setting up again.
+    const entry =
+      item.kind === 'project'
+        ? item.entry
+        : registeredProjects.find((p) => p.demo)
+
+    if (item.kind === 'example' && !entry) {
       onComplete({ kind: 'demo', updates: {} })
       return
     }
+    if (!entry) return
 
     setLoading(true)
     void (async () => {
       try {
-        const { updates, accountName } = await loadRecentProjectUpdates(item.entry)
+        const { updates, accountName } = await loadRecentProjectUpdates(entry)
         onComplete({
-          kind: item.entry.demo ? 'demo' : 'regular',
+          kind: entry.demo ? 'demo' : 'regular',
           updates,
           accountName,
         })

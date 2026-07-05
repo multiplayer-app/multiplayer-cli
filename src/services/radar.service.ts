@@ -94,6 +94,12 @@ export interface RadarService {
     signal?: AbortSignal
   ) => Promise<void>
   abortChat: (workspaceId: string, projectId: string, chatId: string) => Promise<void>
+  updateChat: (
+    workspaceId: string,
+    projectId: string,
+    chatId: string,
+    payload: { title?: string; git?: { branchName?: string } }
+  ) => Promise<void>
   fetchChat: (workspaceId: string, projectId: string, chatId: string) => Promise<AgentChat>
   subscribeChat: (chatId: string) => void
   unsubscribeChat: (chatId: string) => void
@@ -193,7 +199,8 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
         const fresh = await getToken()
         // Propagate the refreshed token back onto the shared config object so
         // subsequent HTTP fetch calls (fetchJson/fetchRaw) also use the new token.
-        config.apiKey = fresh
+        // Guard against null/undefined to avoid sending "Bearer null" on auth failure.
+        if (fresh) config.apiKey = fresh
       } catch {
         // Fall through and use the current token
       }
@@ -430,6 +437,18 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
     await fetchRaw(projectUrl(workspaceId, projectId, `/agents/chats/${chatId}/abort`), { method: 'POST' })
   }
 
+  const updateChat = async (
+    workspaceId: string,
+    projectId: string,
+    chatId: string,
+    payload: { title?: string; git?: { branchName?: string } },
+  ): Promise<void> => {
+    await fetchJson(projectUrl(workspaceId, projectId, `/agents/chats/${chatId}`), {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    })
+  }
+
   const fetchChat = async (workspaceId: string, projectId: string, chatId: string): Promise<AgentChat> => {
     return fetchJson<AgentChat>(projectUrl(workspaceId, projectId, `/agents/chats/${chatId}`))
   }
@@ -486,6 +505,7 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
     subscribeChat,
     unsubscribeChat,
     abortChat,
+    updateChat,
     fetchChat,
     fetchAgentChats,
     listComponents,

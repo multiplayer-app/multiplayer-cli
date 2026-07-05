@@ -1,8 +1,9 @@
-import { useState, type ReactElement } from 'react'
+import type { ReactElement } from 'react'
 import type { KeyEvent, MouseEvent } from '@opentui/core'
 import { MouseButton } from '@opentui/core'
+import { useFocusZone, useListNavigation } from '../../lib/focus/index.js'
 import { tuiAttrs } from '../../lib/tuiAttrs.js'
-import { useKeyboard, useTerminalDimensions } from '@opentui/react'
+import { useTerminalDimensions } from '@opentui/react'
 import type { QuitMode } from '../../runtime/types.js'
 import {
   ACCENT,
@@ -69,7 +70,6 @@ function applyOption(
 }
 
 export function QuitScreen({ onQuit, onCancel, onRestartSetup }: Props): ReactElement {
-  const [selectedIndex, setSelectedIndex] = useState(0)
   const { width, height } = useTerminalDimensions()
 
   const runOption = (index: number) => {
@@ -77,27 +77,28 @@ export function QuitScreen({ onQuit, onCancel, onRestartSetup }: Props): ReactEl
     if (opt) applyOption(opt, onQuit, onCancel, onRestartSetup)
   }
 
-  useKeyboard((key: KeyEvent) => {
-    const { name } = key
-    if (name === 'up') {
-      setSelectedIndex((i) => Math.max(0, i - 1))
-      key.stopPropagation()
-    } else if (name === 'down') {
-      setSelectedIndex((i) => Math.min(OPTIONS.length - 1, i + 1))
-      key.stopPropagation()
-    } else if (name === 'return') {
-      runOption(selectedIndex)
-      key.stopPropagation()
-    } else if (name === 'escape' || name === 'q') {
-      onCancel()
-      key.stopPropagation()
-    } else {
-      const n = OPTIONS.findIndex((o) => o.digit === name)
+  // Registers on the 'quit' FocusLayer (App.tsx); Escape = layer dismiss.
+  useFocusZone({ id: 'quit-options', order: 0 })
+
+  const { index: selectedIndex, setIndex: setSelectedIndex } = useListNavigation({
+    zoneId: 'quit-options',
+    items: OPTIONS,
+    // Enter only — Space must NOT trigger a quit (it's an easy accidental keypress).
+    activateOnEnterOnly: true,
+    onActivate: (_opt, i) => runOption(i),
+    extraKeys: (key) => {
+      // Quick pick: digits 1-4 jump-select and run; q cancels like Esc.
+      if (key.name === 'q' || key.name === 'Q') {
+        onCancel()
+        return true
+      }
+      const n = OPTIONS.findIndex((o) => o.digit === key.name)
       if (n >= 0) {
         setSelectedIndex(n)
         runOption(n)
-        key.stopPropagation()
+        return true
       }
+      return false
     }
   })
 

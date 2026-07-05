@@ -3,6 +3,7 @@ import { tuiAttrs } from '../lib/tuiAttrs.js'
 import { openUrl } from '../lib/openUrl.js'
 import { clickHandler } from './shared/index.js'
 import type { DemoStatus } from '../lib/demoProcess.js'
+import { getWebBaseUrl } from '../config.js'
 
 interface Props {
   workspace?: string
@@ -11,6 +12,7 @@ interface Props {
   demoStatus: DemoStatus
   demoUrl: string | null
   demoError?: string | null
+  apiUrl?: string
 }
 
 function DemoRunInstructionsImpl({
@@ -20,9 +22,10 @@ function DemoRunInstructionsImpl({
   demoStatus,
   demoUrl,
   demoError,
+  apiUrl,
 }: Props): ReactElement {
-  const agentsUrl =
-    workspace && project ? `https://go.multiplayer.app/project/${workspace}/${project}/default/agents` : null
+  const webBase = getWebBaseUrl(apiUrl)
+  const agentsUrl = workspace && project ? `${webBase}/project/${workspace}/${project}/default/agents` : null
 
   const statusColor =
     demoStatus === 'running' ? '#10b981' : demoStatus === 'error' ? '#ef4444' : demoStatus === 'stopped' ? '#9ca3af' : '#f59e0b'
@@ -76,7 +79,7 @@ function DemoRunInstructionsImpl({
         <box marginTop={1} onMouseUp={agentsUrl ? clickHandler(() => openUrl(agentsUrl)) : undefined}>
           <text>
             <span fg='#22d3ee' attributes={tuiAttrs({ underline: true })}>
-              {agentsUrl ?? 'https://go.multiplayer.app'}
+              {agentsUrl ?? webBase}
             </span>
           </text>
         </box>

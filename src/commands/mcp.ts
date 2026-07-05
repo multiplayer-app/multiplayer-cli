@@ -5,6 +5,8 @@ import fs from 'fs'
 import path from 'path'
 import jwt from 'jsonwebtoken'
 import * as API from '../services/version-api.service.js'
+import { API_URL } from '../config.js'
+import { getAuthHeaders } from '../lib/authHeaders.js'
 
 interface JwtPayload {
   workspace?: string
@@ -143,6 +145,78 @@ export async function startMcpServer(): Promise<void> {
       return {
         content: [{ type: 'text' as const, text: `Uploaded ${files.length} sourcemap(s) for release "${release}" of service "${service}".` }],
       }
+    },
+  )
+
+  const baseUrl = process.env.MULTIPLAYER_URL || API_URL
+  const debugSessionId = z.string().describe('The debug session ID')
+
+  server.registerTool(
+    'get_debug_session_traces',
+    {
+      description: 'Fetch OTLP traces for a Multiplayer debug session.',
+      inputSchema: { debugSessionId },
+    },
+    async ({ debugSessionId: id }) => {
+      const apiKey = requireApiKey()
+      const { workspace, project } = decodeJwt(apiKey)
+      const url = new URL(`${baseUrl}/v0/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/otel-traces`)
+      url.searchParams.set('skip', '0')
+      url.searchParams.set('limit', '300')
+      const res = await fetch(url.toString(), { headers: getAuthHeaders(apiKey) })
+      const data = res.ok ? await res.json() : { error: `${res.status} ${res.statusText}` }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] }
+    },
+  )
+
+  server.registerTool(
+    'get_debug_session_logs',
+    {
+      description: 'Fetch OTLP logs for a Multiplayer debug session.',
+      inputSchema: { debugSessionId },
+    },
+    async ({ debugSessionId: id }) => {
+      const apiKey = requireApiKey()
+      const { workspace, project } = decodeJwt(apiKey)
+      const url = new URL(`${baseUrl}/v0/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/otel-logs`)
+      url.searchParams.set('skip', '0')
+      url.searchParams.set('limit', '300')
+      const res = await fetch(url.toString(), { headers: getAuthHeaders(apiKey) })
+      const data = res.ok ? await res.json() : { error: `${res.status} ${res.statusText}` }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] }
+    },
+  )
+
+  server.registerTool(
+    'get_debug_session_notes',
+    {
+      description: 'Fetch session notes and sketches for a Multiplayer debug session.',
+      inputSchema: { debugSessionId },
+    },
+    async ({ debugSessionId: id }) => {
+      const apiKey = requireApiKey()
+      const { workspace, project } = decodeJwt(apiKey)
+      const url = new URL(`${baseUrl}/v0/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/session-notes/context`)
+      const res = await fetch(url.toString(), { headers: getAuthHeaders(apiKey) })
+      const data = res.ok ? await res.json() : { error: `${res.status} ${res.statusText}` }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] }
+    },
+  )
+
+  server.registerTool(
+    'get_debug_session_rrweb_timeline',
+    {
+      description: 'Fetch the rrweb UI recording timeline for a Multiplayer debug session.',
+      inputSchema: { debugSessionId },
+    },
+    async ({ debugSessionId: id }) => {
+      const apiKey = requireApiKey()
+      const { workspace, project } = decodeJwt(apiKey)
+      const url = new URL(`${baseUrl}/v0/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/rrweb-events`)
+      url.searchParams.set('limit', '5000')
+      const res = await fetch(url.toString(), { headers: getAuthHeaders(apiKey) })
+      const data = res.ok ? await res.json() : { error: `${res.status} ${res.statusText}` }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] }
     },
   )
 

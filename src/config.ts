@@ -12,6 +12,18 @@ export const PRODUCTION_HOSTNAME = 'api.multiplayer.app'
 export const PRODUCTION_WEB_HOSTNAME = 'go.multiplayer.app'
 export const API_URL = process.env.MULTIPLAYER_URL || `https://${PRODUCTION_HOSTNAME}/v0`
 export const BASE_API_URL = process.env.MULTIPLAYER_BASE_URL || `https://${PRODUCTION_HOSTNAME}`
+
+/** Derives the web app base URL from the API URL (e.g. --url flag). */
+export function getWebBaseUrl(apiUrl?: string): string {
+  if (!apiUrl) return `https://${PRODUCTION_WEB_HOSTNAME}`
+  try {
+    const { hostname } = new URL(apiUrl)
+    if (hostname === PRODUCTION_HOSTNAME) return `https://${PRODUCTION_WEB_HOSTNAME}`
+    return new URL(apiUrl).origin
+  } catch {
+    return `https://${PRODUCTION_WEB_HOSTNAME}`
+  }
+}
 // ─── Demo repo ────────────────────────────────────────────────────────────────
 
 export const DEMO_REPO_URL = 'https://github.com/multiplayer-app/cli-app-demo'

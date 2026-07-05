@@ -65,6 +65,13 @@ function getToolDetail(tc: AgentToolCall): string | null {
       }
       return null
     }
+    case 'read_file': {
+      if (typeof input.path === 'string') {
+        const parts = (input.path as string).split('/')
+        return parts.slice(-2).join('/')
+      }
+      return null
+    }
     case 'Edit': {
       if (typeof input.file_path === 'string') {
         const parts = (input.file_path as string).split('/')
@@ -78,6 +85,20 @@ function getToolDetail(tc: AgentToolCall): string | null {
         return parts.slice(-2).join('/')
       }
       return null
+    }
+    case 'write_patch': {
+      const patches = input.patches
+      if (!Array.isArray(patches) || patches.length === 0) return null
+      const filePaths = (patches as Array<{ filePath?: string }>)
+        .map((p) => {
+          if (typeof p.filePath !== 'string') return null
+          const parts = p.filePath.split('/')
+          return parts.slice(-2).join('/')
+        })
+        .filter(Boolean)
+      if (filePaths.length === 0) return null
+      if (filePaths.length === 1) return filePaths[0] as string
+      return `${filePaths[0]} +${filePaths.length - 1} more`
     }
     case 'Glob': {
       const pat = typeof input.pattern === 'string' ? (input.pattern as string) : null
@@ -623,11 +644,18 @@ const buildMessageRows = (msg: SessionMessage, contentWidth?: number): DetailRow
   }
 
   // Tools where raw output is noisy — detail line already conveys what happened.
-  const SUPPRESS_OUTPUT = new Set(['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Agent', 'ToolSearch'])
+  const SUPPRESS_OUTPUT = new Set(['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Agent', 'ToolSearch', 'read_file', 'write_patch'])
+
+  // Map snake_case provider tool names to friendly display labels.
+  const TOOL_DISPLAY_NAMES: Record<string, string> = {
+    read_file: 'Read',
+    write_patch: 'Write',
+  }
 
   for (const tc of toolCalls) {
     const { icon, color: iconColor } = getToolStatus(tc.status)
     const detail = getToolDetail(tc) ?? ''
+    const displayName = TOOL_DISPLAY_NAMES[tc.name] ?? tc.name
 
     rows.push({
       key: `tool-${msg.id}-${tc.id}-0`,
@@ -635,7 +663,7 @@ const buildMessageRows = (msg: SessionMessage, contentWidth?: number): DetailRow
       icon,
       iconColor,
       nameColor: FG_MUTED,
-      name: tc.name,
+      name: displayName,
       detail,
     })
 
@@ -844,6 +872,7 @@ interface Props {
   demoStatus?: import('../../lib/demoProcess.js').DemoStatus
   demoUrl?: string | null
   demoError?: string | null
+  apiUrl?: string
   /** Primary click anywhere in the pane moves dashboard focus here (terminal mouse). */
   onRequestFocus?: () => void
   onRequestLoadMore?: () => void
@@ -861,6 +890,7 @@ function SessionDetailPaneImpl({
   demoStatus,
   demoUrl,
   demoError,
+  apiUrl,
   onRequestFocus,
   onRequestLoadMore,
 }: Props): ReactElement {
@@ -1009,6 +1039,7 @@ function SessionDetailPaneImpl({
             demoStatus={demoStatus}
             demoUrl={demoUrl}
             demoError={demoError}
+            apiUrl={apiUrl}
           />
         </scrollbox>
       </box>

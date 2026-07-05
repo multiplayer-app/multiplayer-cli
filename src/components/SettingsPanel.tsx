@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import type { KeyEvent, MouseEvent } from '@opentui/core'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import type { MouseEvent } from '@opentui/core'
 import { MouseButton, ScrollBoxRenderable } from '@opentui/core'
+import { useFocusZone, useListNavigation } from '../lib/focus/index.js'
 import { tuiAttrs } from '../lib/tuiAttrs.js'
-import { useKeyboard, useTerminalDimensions } from '@opentui/react'
+import { useTerminalDimensions } from '@opentui/react'
 import type { IAgent } from '../types/index.js'
 import type { GitSettings } from '../cli/profile.js'
 import {
@@ -46,9 +47,9 @@ const ADVANCED_SETTINGS_SCROLL_STYLE = {
   }
 } as const
 
-type Focus = { area: 'list'; idx: number } | { area: 'apply' } | { area: 'cancel' }
-
 const AUTO_RESOLVE_KEY = 'auto-resolve'
+const APPLY_KEY = 'apply'
+const CANCEL_KEY = 'cancel'
 
 const GIT_FIELDS: { key: keyof GitSettings; rowKey: string; label: string }[] = [
   { key: 'use_worktree', rowKey: 'git-use_worktree', label: 'Use worktree' },
@@ -105,7 +106,6 @@ export function SettingsPanel({
   const [autoResolve, setAutoResolve] = useState(false)
   const [gitState, setGitState] = useState<GitSettings>(() => initialGitSettings ?? {})
   const [gitAdvanced, setGitAdvanced] = useState<boolean>(() => detectGitMode(initialGitSettings ?? {}) === null)
-  const [focus, setFocus] = useState<Focus>({ area: 'list', idx: 0 })
   const listScrollRef = useRef<ScrollBoxRenderable | null>(null)
   const currentGitMode = useMemo(() => detectGitMode(gitState), [gitState])
 
@@ -143,26 +143,6 @@ export function SettingsPanel({
       ...checkboxGroupKeys('comp', compItems)
     ],
     [envItems, compItems, gitAdvanced]
-  )
-
-  const lastListIdx = Math.max(0, flatKeys.length - 1)
-  const focusedKey = focus.area === 'list' ? (flatKeys[focus.idx] ?? null) : null
-
-  useEffect(() => {
-    setFocus((f) => (f.area === 'list' && f.idx > lastListIdx ? { area: 'list', idx: lastListIdx } : f))
-  }, [lastListIdx])
-
-  useLayoutEffect(() => {
-    if (!focusedKey) return
-    listScrollRef.current?.scrollChildIntoView(`cb-${focusedKey}`)
-  }, [focusedKey])
-
-  const setFocusByKey = useCallback(
-    (key: string) => {
-      const i = flatKeys.indexOf(key)
-      if (i >= 0) setFocus({ area: 'list', idx: i })
-    },
-    [flatKeys]
   )
 
   const applyMain = useCallback(() => {
@@ -215,75 +195,46 @@ export function SettingsPanel({
     [environments, components]
   )
 
-  useKeyboard(
-    useCallback(
-      (key: KeyEvent) => {
-        const { name } = key
-        if (name === 'escape') {
-          onClose()
-          key.stopPropagation()
-          return
-        }
-        if (name === 'up') {
-          setFocus((f) => {
-            if (f.area === 'cancel') return { area: 'apply' }
-            if (f.area === 'apply') return { area: 'list', idx: lastListIdx }
-            return { area: 'list', idx: Math.max(0, f.idx - 1) }
-          })
-          key.stopPropagation()
-          return
-        }
-        if (name === 'down') {
-          setFocus((f) => {
-            if (f.area === 'list') {
-              if (f.idx < lastListIdx) return { area: 'list', idx: f.idx + 1 }
-              return { area: 'apply' }
-            }
-            if (f.area === 'apply') return { area: 'cancel' }
-            return f
-          })
-          key.stopPropagation()
-          return
-        }
-        const sb = listScrollRef.current
-        if (sb) {
-          if (name === 'pageup') {
-            sb.scrollBy(-0.5, 'viewport')
-            key.stopPropagation()
-            return
-          }
-          if (name === 'pagedown') {
-            sb.scrollBy(0.5, 'viewport')
-            key.stopPropagation()
-            return
-          }
-          if (name === 'home') {
-            sb.scrollBy(-1, 'content')
-            key.stopPropagation()
-            return
-          }
-          if (name === 'end') {
-            sb.scrollBy(1, 'content')
-            key.stopPropagation()
-            return
-          }
-        }
-        if (name === 'return') {
-          if (focus.area === 'apply') applyMain()
-          else if (focus.area === 'cancel') onClose()
-          else if (focusedKey) activateKey(focusedKey)
-          key.stopPropagation()
-          return
-        }
-        if (name === 'space') {
-          if (focus.area === 'list' && focusedKey) {
-            activateKey(focusedKey)
-            key.stopPropagation()
-          }
-        }
-      },
-      [focus, focusedKey, lastListIdx, activateKey, applyMain, onClose]
-    )
+  // Registers on the 'settings' FocusLayer; Escape falls through to the
+  // layer's onDismiss. ↑↓ walk every row plus the Apply/Cancel buttons,
+  // Enter activates any of them, PgUp/PgDn/Home/End scroll, and the focused
+  // row is kept in view.
+  useFocusZone({ id: 'settings-form', order: 0 })
+
+  const navItems = useMemo<string[]>(() => [...flatKeys, APPLY_KEY, CANCEL_KEY], [flatKeys])
+
+  const { index: navIndex, setIndex: setNavIndex } = useListNavigation({
+    zoneId: 'settings-form',
+    items: navItems,
+    // Enter activates anything; Space only toggles a checkbox row (matching the
+    // old handler) — Space on Apply/Cancel must not apply or discard settings.
+    activateOnEnterOnly: true,
+    onActivate: (key) => {
+      if (key === APPLY_KEY) applyMain()
+      else if (key === CANCEL_KEY) onClose()
+      else activateKey(key)
+    },
+    extraKeys: (key, i) => {
+      if (key.name !== 'space') return false
+      const item = navItems[i]
+      if (!item || item === APPLY_KEY || item === CANCEL_KEY) return false
+      activateKey(item)
+      return true
+    },
+    itemId: (key) => (key === APPLY_KEY || key === CANCEL_KEY ? undefined : `cb-${key}`),
+    scrollRef: listScrollRef,
+    pageScroll: true
+  })
+
+  const focusedItem = navItems[navIndex] ?? null
+  const focusedKey = focusedItem === APPLY_KEY || focusedItem === CANCEL_KEY ? null : focusedItem
+
+  const setFocusByKey = useCallback(
+    (key: string) => {
+      const i = navItems.indexOf(key)
+      if (i >= 0) setNavIndex(i)
+    },
+    [navItems, setNavIndex]
   )
 
   const backdropMouseUp = (e: MouseEvent) => {
@@ -299,13 +250,13 @@ export function SettingsPanel({
   const dialogWidth = Math.min(76, width - 4)
   const maxLabelWidth = dialogWidth - 12
 
-  const renderActionButton = (area: 'apply' | 'cancel', label: string, onActivate: () => void): ReactElement =>
+  const renderActionButton = (area: typeof APPLY_KEY | typeof CANCEL_KEY, label: string, onActivate: () => void): ReactElement =>
     (
       <FocusedOutlineButton
         label={label}
-        focused={focus.area === area}
+        focused={focusedItem === area}
         onPress={() => {
-          setFocus({ area })
+          setFocusByKey(area)
           onActivate()
         }}
       />

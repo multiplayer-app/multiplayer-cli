@@ -38,6 +38,8 @@ export const createBranch = async (dir: string, branchName: string): Promise<voi
 export const commitAll = async (dir: string, message: string): Promise<string> => {
   const git: SimpleGit = simpleGit(dir)
   await git.add('.')
+  const status = await git.status()
+  if (status.isClean()) return ''
   const result = await git.commit(message)
   return result.commit
 }
@@ -85,6 +87,11 @@ export const getBranchUrl = (repositoryUrl: string, branchName: string): string 
 export const makeBranchName = (issueComponentHash: string, issueTitle: string): string => {
   const slug = sanitizeBranchName(issueTitle)
   return `fix/issue-${slug}-${issueComponentHash.slice(-8)}`
+}
+
+export const makeChatBranchName = (chatId: string, title: string): string => {
+  const slug = sanitizeBranchName(title || 'chat')
+  return `chat/${slug}-${chatId.slice(-8)}`
 }
 
 export const getDefaultBranch = async (dir: string): Promise<string> => {
@@ -150,8 +157,8 @@ export const getWorktreeForBranch = async (repoDir: string, branchName: string):
     const blocks = result.trim().split('\n\n')
     for (const block of blocks) {
       const lines = block.trim().split('\n')
-      const worktreeLine = lines.find(l => l.startsWith('worktree '))
-      const branchLine = lines.find(l => l.startsWith('branch '))
+      const worktreeLine = lines.find((l) => l.startsWith('worktree '))
+      const branchLine = lines.find((l) => l.startsWith('branch '))
       if (worktreeLine && branchLine) {
         const worktreePath = worktreeLine.slice('worktree '.length)
         const branch = branchLine.slice('branch refs/heads/'.length)
@@ -161,7 +168,11 @@ export const getWorktreeForBranch = async (repoDir: string, branchName: string):
             return worktreePath
           }
           // Prune the stale entry so future worktree adds don't fail
-          try { await git.raw(['worktree', 'prune']) } catch { /* best-effort */ }
+          try {
+            await git.raw(['worktree', 'prune'])
+          } catch {
+            /* best-effort */
+          }
         }
       }
     }
@@ -171,11 +182,7 @@ export const getWorktreeForBranch = async (repoDir: string, branchName: string):
   }
 }
 
-export const createWorktree = async (
-  repoDir: string,
-  worktreeDir: string,
-  branchName: string,
-): Promise<string> => {
+export const createWorktree = async (repoDir: string, worktreeDir: string, branchName: string): Promise<string> => {
   const existing = await getWorktreeForBranch(repoDir, branchName)
   if (existing) {
     return existing
@@ -187,14 +194,25 @@ export const createWorktree = async (
   } catch {
     // best-effort fetch
   }
+  // Prefer branching from the remote default branch, but fall back to local HEAD
+  // when there is no usable origin ref (e.g. a repo with no remote — common for
+  // manual chats) so worktree creation still succeeds.
+  let baseRef = `origin/${defaultBranch}`
   try {
-    await git.raw(['worktree', 'add', '-b', branchName, worktreeDir, `origin/${defaultBranch}`])
+    // Non-quiet so a missing ref exits non-zero and rejects (—quiet exits 1 but
+    // simple-git does not surface that as an error).
+    await git.raw(['rev-parse', '--verify', baseRef])
+  } catch {
+    baseRef = 'HEAD'
+  }
+  try {
+    await git.raw(['worktree', 'add', '-b', branchName, worktreeDir, baseRef])
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('already exists')) {
       // Branch exists locally from a previous attempt — reset it to the latest
-      // default branch so the new fix starts from the correct base commit.
-      await git.raw(['branch', '-f', branchName, `origin/${defaultBranch}`])
+      // base commit so the new fix starts from the correct point.
+      await git.raw(['branch', '-f', branchName, baseRef])
       await git.raw(['worktree', 'add', worktreeDir, branchName])
       return worktreeDir
     } else {
@@ -202,6 +220,44 @@ export const createWorktree = async (
     }
   }
   return worktreeDir
+}
+
+/**
+ * Creates a worktree on a *detached* HEAD (no branch). Used for manual chats so
+ * a turn that changes nothing leaves no junk branch behind — the branch is only
+ * created later via promoteWorktreeToBranch if the agent actually edits files.
+ * Branches from the remote default branch when available, else local HEAD; skips
+ * the network fetch to keep per-chat setup fast.
+ */
+export const createDetachedWorktree = async (repoDir: string, worktreeDir: string): Promise<string> => {
+  const git = simpleGit(repoDir)
+  let baseRef = 'HEAD'
+  try {
+    const defaultBranch = await getDefaultBranch(repoDir)
+    const candidate = `origin/${defaultBranch}`
+    // Non-quiet so a missing ref rejects (—quiet exits 1 but simple-git ignores that).
+    await git.raw(['rev-parse', '--verify', candidate])
+    baseRef = candidate
+  } catch {
+    baseRef = 'HEAD'
+  }
+  await git.raw(['worktree', 'add', '--detach', worktreeDir, baseRef])
+  return worktreeDir
+}
+
+/**
+ * Names the detached worktree's current state as a branch, preserving any
+ * uncommitted working-tree changes. Falls back to -B if a stale branch of the
+ * same name lingers from a previous attempt.
+ */
+export const promoteWorktreeToBranch = async (worktreeDir: string, branchName: string): Promise<void> => {
+  const git = simpleGit(worktreeDir)
+  try {
+    await git.checkoutLocalBranch(branchName)
+  } catch {
+    // Branch already exists locally — re-point it at HEAD, keeping working changes.
+    await git.raw(['checkout', '-B', branchName])
+  }
 }
 
 export const branchExistsLocally = async (dir: string, branchName: string): Promise<boolean> => {
@@ -225,7 +281,11 @@ export const branchExistsRemotely = async (dir: string, branchName: string): Pro
   }
 }
 
-export const createWorktreeFromExisting = async (repoDir: string, worktreeDir: string, branchName: string): Promise<string> => {
+export const createWorktreeFromExisting = async (
+  repoDir: string,
+  worktreeDir: string,
+  branchName: string,
+): Promise<string> => {
   const existing = await getWorktreeForBranch(repoDir, branchName)
   if (existing) {
     return existing

@@ -12,6 +12,7 @@ interface Props {
   config: AgentConfig
   onComplete: (config: AgentConfig) => void
   onBack?: () => void
+  onChangeModel?: () => void
 }
 
 type Status = 'checking-api-key' | 'checking-git' | 'checking-ai' | 'done' | 'error'
@@ -98,14 +99,16 @@ function CheckStepBlock({
   ) as ReactElement
 }
 
-export function ConnectingStep({ config, onComplete, onBack }: Props): ReactElement {
+export function ConnectingStep({ config, onComplete, onBack, onChangeModel }: Props): ReactElement {
   const [status, setStatus] = useState<Status>('checking-api-key')
   const [failedStep, setFailedStep] = useState<CheckStep | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [runId, setRunId] = useState(0)
   const [selectedAction, setSelectedAction] = useState(0)
 
-  const actionCount = onBack ? 2 : 1
+  const isModelNotFound = failedStep === 'ai' && (error?.toLowerCase().includes('not found') ?? false)
+  const showChangeModel = isModelNotFound && !!onChangeModel
+  const actionCount = showChangeModel ? (onBack ? 3 : 2) : (onBack ? 2 : 1)
 
   const showAiRow = status !== 'checking-api-key' && status !== 'checking-git'
   const stepError = (step: CheckStep): string | null => (status === 'error' && failedStep === step ? error : null)
@@ -120,6 +123,7 @@ export function ConnectingStep({ config, onComplete, onBack }: Props): ReactElem
 
   const activateAction = (index: number) => {
     if (index === 0) retry()
+    else if (showChangeModel && index === 1) onChangeModel?.()
     else onBack?.()
   }
 
@@ -173,10 +177,18 @@ export function ConnectingStep({ config, onComplete, onBack }: Props): ReactElem
           const isClaudeModel = config.model === 'claude-code' || config.model.startsWith('claude')
           if (isClaudeModel) {
             await AiService.checkClaudeRequirements(config.model)
+          } else if (AiService.isGeminiModel(config.model)) {
+            await AiService.checkGeminiRequirements(config.modelKey, config.model)
           } else {
             await AiService.checkOpenAiRequirements(config.modelKey, config.modelUrl, config.model)
           }
         } catch (err: unknown) {
+          if (cancelled) return
+          const msg = (err as Error).message ?? ''
+          if (msg.toLowerCase().includes('not found') && onChangeModel) {
+            onChangeModel()
+            return
+          }
           setFailedStep('ai')
           throw err
         }
@@ -246,15 +258,28 @@ export function ConnectingStep({ config, onComplete, onBack }: Props): ReactElem
               retry()
             }}
           />
+          {showChangeModel && (
+            <ActionButton
+              label='Change Model'
+              icon='⚙'
+              iconColor='#f59e0b'
+              labelColor='#f59e0b'
+              borderColor={selectedAction === 1 ? '#f59e0b' : BORDER_SUBTLE}
+              onClick={() => {
+                setSelectedAction(1)
+                onChangeModel?.()
+              }}
+            />
+          )}
           {onBack && (
             <ActionButton
               label='Back'
               icon='←'
               iconColor='#9ca3af'
               labelColor='#9ca3af'
-              borderColor={selectedAction === 1 ? '#9ca3af' : BORDER_SUBTLE}
+              borderColor={selectedAction === (showChangeModel ? 2 : 1) ? '#9ca3af' : BORDER_SUBTLE}
               onClick={() => {
-                setSelectedAction(1)
+                setSelectedAction(showChangeModel ? 2 : 1)
                 onBack()
               }}
             />

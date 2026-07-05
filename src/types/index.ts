@@ -1,3 +1,6 @@
+/** How the agent should behave for user-driven chat turns (not automated resolveIssue). */
+export type AgentSessionMode = 'interactive' | 'issue_fix'
+
 export interface AgentConfig {
   url: string
   apiKey: string
@@ -166,6 +169,7 @@ export interface AgentMessage {
   reasoning?: string
   toolCalls?: AgentToolCall[]
   attachments?: AgentAttachment[]
+  annotations?: Record<string, unknown>
   agentName?: string
   activity?: string
   createdAt?: string
@@ -175,6 +179,8 @@ export interface AgentMessage {
 export interface ConversationMessage {
   role: 'user' | 'assistant'
   content: string
+  /** Base64 data URLs for image attachments (vision models). */
+  images?: string[]
 }
 
 export type AgentType = 'CODING' | 'DEBUGGING'

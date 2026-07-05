@@ -1,6 +1,14 @@
 import { useState, useCallback, useEffect, useMemo, type ReactElement } from 'react'
-import type { KeyEvent } from '@opentui/core'
-import { useKeyboard, useTerminalDimensions } from '@opentui/react'
+import { useTerminalDimensions } from '@opentui/react'
+import {
+  FocusLayer,
+  useActiveZone,
+  useFocusManager,
+  useFocusZone,
+  useListNavigation,
+  useShortcut,
+  useStatusHints
+} from '../../lib/focus/index.js'
 import type { RuntimeState, SessionDetail } from '../../runtime/types.js'
 import type { AgentConfig, AgentChatStatus, LogEntry, IAgent } from '../../types/index.js'
 import type { GitSettings } from '../../cli/profile.js'
@@ -9,11 +17,10 @@ import { ModelPanel } from '../ModelPanel.js'
 import { DashboardHeader } from '../DashboardHeader.js'
 import { SessionListPane } from '../panes/SessionListPane.js'
 import { SessionDetailPane } from '../panes/SessionDetailPane.js'
-import { dashboardSettingsHint } from '../panes/FooterHints.js'
 import { ChatComposer, type SlashCommand } from '../ChatComposer.js'
 import { ContextSidebar } from '../ContextSidebar.js'
 import { LogsDock } from '../LogsDock.js'
-import { StatusBar, type StatusBarHint } from '../StatusBar.js'
+import { StatusBar } from '../StatusBar.js'
 import { demoProcess, type DemoState } from '../../lib/demoProcess.js'
 import pkg from '../../../package.json' with { type: 'json' }
 
@@ -27,7 +34,15 @@ const SIDEBAR_BREAKPOINT = 150
 
 const CLI_VERSION = pkg.version
 
-type FocusedPane = 'list' | 'detail' | 'composer' | 'logs'
+const LIST_ZONE_HINTS = [
+  { id: 'nav', keys: '↑↓', label: 'select' },
+  { id: 'enter', keys: '↵', label: 'open' }
+] as const
+
+const DETAIL_ZONE_HINTS = [
+  { id: 'scroll', keys: '↑↓', label: 'scroll' },
+  { id: 'page', keys: 'PgUp/Dn', label: 'page' }
+] as const
 
 // ── Props ───────────────────────────────────────────────────────────────────
 
@@ -46,8 +61,6 @@ interface Props {
   onUnsubscribeSession: (chatId: string) => void
   onLoadMoreSessions?: () => void
   hasMoreSessions?: boolean
-  /** When true (e.g. quit dialog open), ignore keys so the overlay handles them. */
-  suspendKeyboard?: boolean
   onEmitAgentSettings?: (settings: Partial<NonNullable<IAgent['settings']>>) => void
   onUpdateGitSettings?: (git: GitSettings) => void
   onUpdateModel?: (updates: Partial<AgentConfig>) => void
@@ -71,7 +84,6 @@ export function DashboardScreen({
   onUnsubscribeSession,
   onLoadMoreSessions,
   hasMoreSessions = false,
-  suspendKeyboard = false,
   onEmitAgentSettings,
   onUpdateGitSettings,
   onUpdateModel,
@@ -93,8 +105,8 @@ export function DashboardScreen({
 
   // ── Focus & selection state ─────────────────────────────────────────────────
 
+  const focusManager = useFocusManager()
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const [focusedPane, setFocusedPane] = useState<FocusedPane>('list')
   const [showLogs, setShowLogs] = useState(false)
   const [narrowShowsDetail, setNarrowShowsDetail] = useState(false)
   const [showSettingsPanel, setShowSettingsPanel] = useState(false)
@@ -121,6 +133,7 @@ export function DashboardScreen({
   const showListPane = !isNarrow || !selectedDetail || !narrowShowsDetail
   const showDetailPane = !isNarrow || Boolean(selectedDetail && narrowShowsDetail)
   const showComposer = showDetailPane && selectedDetail !== null
+  const showSidebar = showContextSidebar && showDetailPane
   const hasSessions = state.sessions.length > 0
 
   const activeCount = state.sessions.filter((s) => !['done', 'failed', 'aborted'].includes(s.status)).length
@@ -128,14 +141,10 @@ export function DashboardScreen({
   // ── Effects ─────────────────────────────────────────────────────────────────
 
   // Auto-show detail in narrow mode when a session is first selected.
-  // Also kick focus out of composer if the session goes away.
+  // (When the session goes away, the composer zone unmounts and the focus
+  // manager falls back to the detail zone automatically.)
   useEffect(() => {
-    if (!selectedDetail) {
-      setNarrowShowsDetail(false)
-      setFocusedPane((fp) => (fp === 'composer' ? 'detail' : fp))
-      return
-    }
-    setNarrowShowsDetail(true)
+    setNarrowShowsDetail(Boolean(selectedDetail))
   }, [selectedDetail?.chatId])
 
   // Subscribe to chat events when a session is selected; unsubscribe on change.
@@ -167,34 +176,66 @@ export function DashboardScreen({
     demoProcess.toggle()
   }, [])
 
-  // ── Focus helpers ───────────────────────────────────────────────────────────
+  // ── Focus zones ─────────────────────────────────────────────────────────────
+  // Tab ring = list → detail → composer → sidebar → logs (manager-owned).
+  // The list and detail zones live here — they must stay in the ring even in
+  // narrow mode where one of the two panes is unmounted. Composer, sidebar and
+  // logs zones register inside their components (their mount conditions match
+  // the ring's visibility rules).
 
-  const focusNext = useCallback(() => {
-    const panes: FocusedPane[] = showComposer
-      ? showLogs
-        ? ['list', 'detail', 'composer', 'logs']
-        : ['list', 'detail', 'composer']
-      : showLogs
-        ? ['list', 'detail', 'logs']
-        : ['list', 'detail']
-    const idx = panes.indexOf(focusedPane)
-    const next = panes[(idx + 1) % panes.length]!
-    if (isNarrow && selectedDetail) {
-      setNarrowShowsDetail(next !== 'list')
-    }
-    setFocusedPane(next)
-  }, [focusedPane, showLogs, showComposer, isNarrow, selectedDetail])
+  const backToList = useCallback(() => {
+    if (isNarrow && selectedDetail) setNarrowShowsDetail(false)
+    focusManager?.focusZone('list')
+    return true
+  }, [focusManager, isNarrow, selectedDetail])
+
+  const listZone = useFocusZone({ id: 'list', order: 0, hints: LIST_ZONE_HINTS })
+  const detailZone = useFocusZone({
+    id: 'detail',
+    order: 1,
+    fallbackZone: 'list',
+    onEscape: backToList,
+    hints: DETAIL_ZONE_HINTS
+  })
+
+  const activeZone = useActiveZone()
+
+  // ↑↓ select, Enter opens the detail pane — registered here (not in the list
+  // pane) so selection keeps working in narrow mode while the pane is hidden.
+  useListNavigation({
+    zoneId: 'list',
+    items: state.sessions,
+    index: clampedIndex,
+    onIndexChange: setSelectedIndex,
+    onActivate: selectedDetail
+      ? () => {
+          if (isNarrow) setNarrowShowsDetail(true)
+          focusManager?.focusZone('detail')
+        }
+      : undefined,
+    activateOnEnterOnly: true
+  })
+
+  // In narrow mode only one of the list/detail panes is mounted, so the
+  // visible pane must track the focused zone. Drive it off the zone's value,
+  // not a transition diff: focusing list shows the list; focusing detail or
+  // the composer shows the detail. Logs/sidebar don't own either pane, so they
+  // leave the current view untouched (peeking at logs won't flip the view, and
+  // closing them restores focus to the prior zone via the manager).
+  useEffect(() => {
+    if (!isNarrow || !selectedDetail) return
+    if (activeZone === 'list') setNarrowShowsDetail(false)
+    else if (activeZone === 'detail' || activeZone === 'composer') setNarrowShowsDetail(true)
+  }, [activeZone, isNarrow, selectedDetail])
 
   const toggleLogs = useCallback(() => {
     setShowLogs((show) => {
-      if (show) {
-        setFocusedPane((fp) => (fp === 'logs' ? 'list' : fp))
-      } else {
-        setFocusedPane('logs')
-      }
+      // Opening: focus lands on the dock as soon as its zone registers.
+      // Closing while focused: the manager restores focus to the prior zone.
+      if (!show) focusManager?.focusZone('logs')
       return !show
     })
-  }, [])
+  }, [focusManager])
 
   const openSettingsPanel = useCallback(() => {
     if (!onEmitAgentSettings || !onLoadRadarLists) return
@@ -230,14 +271,12 @@ export function DashboardScreen({
     [config, modelSettings.model]
   )
 
+  // 'v' flips the narrow stacked view by moving focus between the list and
+  // detail zones; the narrow-sync effect above then swaps the visible pane.
   const toggleNarrowStack = useCallback(() => {
     if (!isNarrow || !selectedDetail) return
-    setNarrowShowsDetail((show) => {
-      const next = !show
-      setFocusedPane((fp) => (fp === 'logs' ? fp : next ? 'detail' : 'list'))
-      return next
-    })
-  }, [isNarrow, selectedDetail])
+    focusManager?.focusZone(narrowShowsDetail ? 'list' : 'detail')
+  }, [isNarrow, selectedDetail, narrowShowsDetail, focusManager])
 
   // ── Slash commands ──────────────────────────────────────────────────────────
 
@@ -276,206 +315,92 @@ export function DashboardScreen({
     [onUpdateModel, openModelPanel, toggleLogs, onEmitAgentSettings, onLoadRadarLists, openSettingsPanel, onRestartSetupRequest, onQuitRequest]
   )
 
-  // ── Keyboard ────────────────────────────────────────────────────────────────
+  // ── Shortcuts (root layer) ──────────────────────────────────────────────────
+  // Suppressed automatically while the composer ('input' zone) is focused and
+  // while any modal layer (settings/model/quit) is on top of the stack.
 
-  useKeyboard(
-    useCallback(
-      (key: KeyEvent) => {
-        if (suspendKeyboard || showSettingsPanel || showModelPanel) return
-        const { name } = key
+  const canOpenSettings = Boolean(onEmitAgentSettings && onLoadRadarLists)
 
-        // ── Global shortcuts ──────────────────────────────────────────────
-
-        if (name === 'tab') {
-          focusNext()
-          key.stopPropagation()
-          return
-        }
-
-        if ((name === 'v' || name === 'V') && isNarrow && selectedDetail) {
-          toggleNarrowStack()
-          key.stopPropagation()
-          return
-        }
-
-        // Escape: context-sensitive back navigation (works in all panes incl. composer).
-        if (name === 'escape') {
-          if (focusedPane === 'composer') {
-            setFocusedPane('detail')
-          } else {
-            if (isNarrow && selectedDetail) setNarrowShowsDetail(false)
-            setFocusedPane('list')
-          }
-          key.stopPropagation()
-          return
-        }
-
-        // Don't steal single-char keys while typing in the composer.
-        if (focusedPane === 'composer') return
-
-        if (name === 'l' || name === 'L') {
-          toggleLogs()
-          key.stopPropagation()
-          return
-        }
-
-        if (name === 's' || name === 'S') {
-          if (onEmitAgentSettings && onLoadRadarLists) {
-            openSettingsPanel()
-            key.stopPropagation()
-          }
-          return
-        }
-
-        if (name === 'm' || name === 'M') {
-          if (onUpdateModel) {
-            openModelPanel()
-            key.stopPropagation()
-          }
-          return
-        }
-
-        if (name === 'i') {
-          if (showComposer) {
-            if (isNarrow) setNarrowShowsDetail(true)
-            setFocusedPane('composer')
-          }
-          key.stopPropagation()
-          return
-        }
-
-        if ((name === 'd' || name === 'D') && config.isDemoProject) {
-          toggleDemo()
-          key.stopPropagation()
-          return
-        }
-
-        // ── Pane-local shortcuts ──────────────────────────────────────────
-
-        if (focusedPane === 'list') {
-          if (name === 'up') {
-            setSelectedIndex((i) => Math.max(0, i - 1))
-            key.stopPropagation()
-          } else if (name === 'down') {
-            setSelectedIndex((i) => Math.min(state.sessions.length - 1, i + 1))
-            key.stopPropagation()
-          } else if (name === 'return' && selectedDetail) {
-            if (isNarrow) setNarrowShowsDetail(true)
-            setFocusedPane('detail')
-            key.stopPropagation()
-          }
-        }
-
-        if (name === 'q' || name === 'Q') {
-          onQuitRequest()
-          key.stopPropagation()
-        }
-
-        if (name === 'r' || name === 'R') {
-          onRestartSetupRequest()
-          key.stopPropagation()
-        }
-      },
-      [
-        suspendKeyboard,
-        focusedPane,
-        focusNext,
-        state.sessions.length,
-        selectedDetail,
-        showComposer,
-        onQuitRequest,
-        onRestartSetupRequest,
-        showLogs,
-        toggleLogs,
-        isNarrow,
-        toggleNarrowStack,
-        showSettingsPanel,
-        showModelPanel,
-        onEmitAgentSettings,
-        onLoadRadarLists,
-        openSettingsPanel,
-        onUpdateModel,
-        openModelPanel,
-        config.isDemoProject,
-        toggleDemo
-      ]
-    )
-  )
+  // The 'i' hint auto-hides while the composer is focused: it's an input zone,
+  // so useStatusHints drops non-reserve single-char shortcuts there.
+  useShortcut({
+    id: 'compose',
+    keys: ['i'],
+    label: 'compose',
+    displayKeys: 'i',
+    order: 10,
+    enabled: showComposer,
+    run: () => {
+      if (isNarrow) setNarrowShowsDetail(true)
+      focusManager?.focusZone('composer')
+    }
+  })
+  useShortcut({
+    id: 'stack',
+    keys: ['v', 'V'],
+    label: narrowShowsDetail ? 'sessions' : 'detail',
+    displayKeys: 'v',
+    order: 20,
+    enabled: isNarrow && Boolean(selectedDetail),
+    run: toggleNarrowStack
+  })
+  useShortcut({
+    id: 'demo',
+    keys: ['d', 'D'],
+    label: demoState.status === 'running' || demoState.status === 'starting' ? 'stop demo' : 'start demo',
+    displayKeys: 'd',
+    order: 30,
+    enabled: Boolean(config.isDemoProject),
+    run: toggleDemo
+  })
+  useShortcut({
+    id: 'model',
+    keys: ['m', 'M'],
+    label: 'model',
+    displayKeys: 'm',
+    order: 40,
+    enabled: Boolean(onUpdateModel),
+    run: openModelPanel
+  })
+  useShortcut({
+    id: 'logs',
+    keys: ['l', 'L'],
+    label: showLogs ? 'hide logs' : 'logs',
+    displayKeys: 'l',
+    order: 50,
+    run: toggleLogs
+  })
+  useShortcut({
+    id: 'settings',
+    keys: ['s', 'S'],
+    label: 'settings',
+    displayKeys: 's',
+    order: 60,
+    enabled: canOpenSettings,
+    run: openSettingsPanel
+  })
+  useShortcut({
+    id: 'setup',
+    keys: ['r', 'R'],
+    label: 'setup',
+    displayKeys: 'r',
+    order: 70,
+    run: onRestartSetupRequest
+  })
+  useShortcut({
+    id: 'quit',
+    keys: ['q', 'Q'],
+    label: 'quit',
+    displayKeys: 'q',
+    order: 80,
+    run: onQuitRequest
+  })
 
   // ── Status bar hints ────────────────────────────────────────────────────────
+  // Derived from the focus registry: Tab + active-zone nav hints + the
+  // labelled shortcuts registered above (clicking a hint runs its shortcut).
 
-  const hints = useMemo((): StatusBarHint[] => {
-    const base: StatusBarHint[] = [{ id: 'tab', keys: 'tab', label: 'navigate' }]
-
-    switch (focusedPane) {
-      case 'list':
-        base.push({ id: 'nav', keys: '↑↓', label: 'select' }, { id: 'enter', keys: '↵', label: 'open' })
-        break
-      case 'detail':
-        base.push({ id: 'scroll', keys: '↑↓', label: 'scroll' }, { id: 'page', keys: 'PgUp/Dn', label: 'page' })
-        break
-      case 'composer':
-        base.push({ id: 'send', keys: '↵', label: 'send' }, { id: 'esc', keys: 'Esc', label: 'back' })
-        break
-      case 'logs':
-        base.push({ id: 'scroll', keys: '↑↓', label: 'scroll' })
-        break
-    }
-
-    if (showComposer && focusedPane !== 'composer') {
-      base.push({ id: 'compose', keys: 'i', label: 'compose' })
-    }
-
-    if (isNarrow && selectedDetail) {
-      base.push({
-        id: 'stack',
-        keys: 'v',
-        label: narrowShowsDetail ? 'sessions' : 'detail',
-        onPress: toggleNarrowStack
-      })
-    }
-
-    if (config.isDemoProject) {
-      const demoLabel =
-        demoState.status === 'running' || demoState.status === 'starting' ? 'stop demo' : 'start demo'
-      base.push({ id: 'demo', keys: 'd', label: demoLabel, onPress: toggleDemo })
-    }
-
-    if (onUpdateModel) {
-      base.push({ id: 'model', keys: 'm', label: 'model', onPress: openModelPanel })
-    }
-
-    base.push(
-      { id: 'logs', keys: 'l', label: showLogs ? 'hide logs' : 'logs', onPress: toggleLogs },
-      { id: 'setup', keys: 'r', label: 'setup', onPress: onRestartSetupRequest },
-      { id: 'quit', keys: 'q', label: 'quit', onPress: onQuitRequest }
-    )
-
-    if (onEmitAgentSettings && onLoadRadarLists) {
-      base.splice(base.length - 2, 0, dashboardSettingsHint(openSettingsPanel))
-    }
-
-    return base
-  }, [
-    focusedPane,
-    showComposer,
-    showLogs,
-    isNarrow,
-    selectedDetail,
-    narrowShowsDetail,
-    toggleNarrowStack,
-    toggleLogs,
-    onQuitRequest,
-    onRestartSetupRequest,
-    onEmitAgentSettings,
-    onLoadRadarLists,
-    openSettingsPanel,
-    onUpdateModel,
-    openModelPanel,
-    config.isDemoProject,
-    demoState.status,
-    toggleDemo
-  ])
+  const hints = useStatusHints()
 
   // Resolve display names for sidebar
   const workspaceLabel =
@@ -489,8 +414,6 @@ export function DashboardScreen({
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
-  const canOpenSettings = Boolean(onEmitAgentSettings && onLoadRadarLists)
-
   return (
     <box position='relative' flexDirection='column' height={rows} width={columns} gap={0}>
       {/* Header - slim single line */}
@@ -502,12 +425,12 @@ export function DashboardScreen({
           <SessionListPane
             sessions={state.sessions}
             selectedIndex={clampedIndex}
-            isFocused={focusedPane === 'list'}
+            isFocused={listZone.isActive}
             layout={isNarrow ? 'fluid' : 'sidebar'}
             fluidTextWidth={listFluidTextWidth}
             onSelectSession={(index) => {
               setSelectedIndex(index)
-              setFocusedPane('list')
+              listZone.focus()
             }}
             hasMore={hasMoreSessions}
             onLoadMore={onLoadMoreSessions}
@@ -519,7 +442,7 @@ export function DashboardScreen({
             <SessionDetailPane
               session={selectedDetail}
               contentWidth={contentWidth}
-              isFocused={focusedPane === 'detail'}
+              isFocused={detailZone.isActive}
               hasSessions={hasSessions}
               isDemoProject={config.isDemoProject}
               demoDir={config.dir}
@@ -528,7 +451,8 @@ export function DashboardScreen({
               demoStatus={demoState.status}
               demoUrl={demoState.url}
               demoError={demoState.error}
-              onRequestFocus={() => setFocusedPane('detail')}
+              apiUrl={config.url}
+              onRequestFocus={detailZone.focus}
               onRequestLoadMore={() =>
                 selectedDetail?.messages[0]?.id &&
                 onLoadMessages(selectedSession?.chatId ?? '', selectedDetail.messages[0].id)
@@ -538,12 +462,9 @@ export function DashboardScreen({
               <ChatComposer
                 chatId={selectedSession?.chatId ?? null}
                 chatStatus={selectedChatStatus}
-                isFocused={focusedPane === 'composer'}
                 width={contentWidth}
                 onSend={onSendMessage}
                 onAbort={onAbortChat}
-                onRequestFocus={() => setFocusedPane('composer')}
-                onEscape={() => setFocusedPane('detail')}
                 slashCommands={slashCommands}
                 onCommand={handleCommand}
               />
@@ -552,7 +473,7 @@ export function DashboardScreen({
         )}
 
         {/* Context sidebar - right panel (wide screens only) */}
-        {showContextSidebar && showDetailPane && (
+        {showSidebar && (
           <ContextSidebar
             session={selectedDetail}
             chatStatus={selectedChatStatus}
@@ -565,7 +486,6 @@ export function DashboardScreen({
             activeCount={activeCount}
             resolvedCount={state.resolvedCount}
             gitSettings={gitSettings}
-            isFocused={false}
             onOpenSettings={canOpenSettings ? openSettingsPanel : undefined}
             isDemoProject={config.isDemoProject}
             demoStatus={demoState.status}
@@ -577,39 +497,36 @@ export function DashboardScreen({
       </box>
 
       {/* Logs dock (toggleable) */}
-      {showLogs && (
-        <LogsDock
-          logs={agentLogs}
-          height={logBlockHeight}
-          isFocused={focusedPane === 'logs'}
-          onRequestFocus={() => setFocusedPane('logs')}
-        />
-      )}
+      {showLogs && <LogsDock logs={agentLogs} height={logBlockHeight} onEscape={backToList} />}
 
       {/* Status bar - clean single line at bottom */}
       <StatusBar hints={hints} version={CLI_VERSION} />
 
       {showSettingsPanel && canOpenSettings && (
-        <SettingsPanel
-          components={radarComponents}
-          environments={radarEnvironments}
-          loadError={radarListError}
-          initialSettings={settingsSnapshot}
-          initialGitSettings={gitSettings}
-          onClose={() => setShowSettingsPanel(false)}
-          onApply={(settings) => {
-            setSettingsSnapshot((prev) => ({ ...prev, ...settings }))
-            onEmitAgentSettings?.(settings)
-          }}
-          onApplyGitSettings={(git) => {
-            setGitSettings((prev) => ({ ...prev, ...git }))
-            onUpdateGitSettings?.(git)
-          }}
-        />
+        <FocusLayer id='settings' onDismiss={() => setShowSettingsPanel(false)}>
+          <SettingsPanel
+            components={radarComponents}
+            environments={radarEnvironments}
+            loadError={radarListError}
+            initialSettings={settingsSnapshot}
+            initialGitSettings={gitSettings}
+            onClose={() => setShowSettingsPanel(false)}
+            onApply={(settings) => {
+              setSettingsSnapshot((prev) => ({ ...prev, ...settings }))
+              onEmitAgentSettings?.(settings)
+            }}
+            onApplyGitSettings={(git) => {
+              setGitSettings((prev) => ({ ...prev, ...git }))
+              onUpdateGitSettings?.(git)
+            }}
+          />
+        </FocusLayer>
       )}
 
       {showModelPanel && onUpdateModel && (
-        <ModelPanel config={headerConfig} onApply={applyModel} onClose={() => setShowModelPanel(false)} />
+        <FocusLayer id='model' onDismiss={() => setShowModelPanel(false)}>
+          <ModelPanel config={headerConfig} onApply={applyModel} onClose={() => setShowModelPanel(false)} />
+        </FocusLayer>
       )}
     </box>
   ) as ReactElement

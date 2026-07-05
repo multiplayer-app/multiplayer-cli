@@ -1,14 +1,13 @@
 import OpenAI from 'openai'
 import Anthropic from '@anthropic-ai/sdk'
-import { query } from '@anthropic-ai/claude-agent-sdk'
+import { query, createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
+import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import cliPath from '@anthropic-ai/claude-agent-sdk/embed'
-import { simpleGit } from 'simple-git'
-import fs from 'fs'
-import path from 'path'
+import { z } from 'zod'
 import { exec, spawn } from 'child_process'
 import { promisify } from 'util'
-import { Issue, FilePatch, Release, ConversationMessage } from '../types/index.js'
-import { MAX_FILE_SIZE, MAX_FILES_TO_READ } from '../config.js'
+import { Issue, Release, ConversationMessage, AgentSessionMode } from '../types/index.js'
 import { logger } from '../logger.js'
 import { logToTui } from '../lib/tuiSink.js'
 import { getAuthHeaders } from '../lib/authHeaders.js'
@@ -19,14 +18,18 @@ import {
 } from '../lib/untrustedObservability.js'
 import {
   buildChatTitlePrompt,
-  buildDebuggingSystemPrompt,
   ANALYSE_ISSUE_SYSTEM_PROMPT,
   buildAnalyseIssueUserMessage,
   PR_GENERATION_SYSTEM_PROMPT,
   buildPrUserMessage,
   buildIssuePromptFallback,
-  buildClaudeCodeDebuggingSystemPrompt,
+  buildSystemPromptForMode,
 } from '../prompts.js'
+import { createProvider, isAnthropicModel } from '../lib/llm/index.js'
+import type { AgentStreamEvent, FilePatch } from '../lib/llm/index.js'
+
+// Re-export classification helpers so callers don't need to import from two places.
+export { isAnthropicModel, isGeminiModel, isCodexModel, getProviderDefaultBaseUrl } from '../lib/llm/index.js'
 
 const execAsync = promisify(exec)
 
@@ -106,8 +109,7 @@ export const checkClaudeRequirements = async (model?: string): Promise<void> => 
     claudeAuthLog('[claude-auth] ANTHROPIC_API_KEY is set — skipping interactive login probe')
   } else {
     const loginError = new Error(
-      'Claude Code is not authenticated.\n' +
-        'Open a new terminal, run "claude" and complete login, then press Retry.',
+      'Claude Code is not authenticated.\n' + 'Open a new terminal, run "claude" and complete login, then press Retry.',
     )
     await probeClaudeLoginViaCli(loginError)
   }
@@ -184,6 +186,34 @@ export const fetchAnthropicModels = async (modelKey?: string): Promise<string[]>
   }
 }
 
+// ─── Gemini auth detection ────────────────────────────────────────────────────
+
+/**
+ * Detects a GEMINI_API_KEY from the environment so the UI can pre-fill it.
+ * Returns null when the env var is absent.
+ */
+export const detectGeminiCliAuth = (): { source: 'env'; key: string } | null => {
+  const envKey = process.env.GEMINI_API_KEY?.trim()
+  if (envKey) return { source: 'env', key: envKey }
+  return null
+}
+
+export const fetchGeminiModels = async (apiKey: string): Promise<string[]> => {
+  try {
+    const { GoogleAIProvider } = await import('../lib/llm/providers/google.js')
+    const provider = new GoogleAIProvider({ model: 'gemini-2.5-flash', apiKey })
+    return await provider.listModels()
+  } catch {
+    return []
+  }
+}
+
+export const checkGeminiRequirements = async (apiKey: string, model: string): Promise<void> => {
+  const { GoogleAIProvider } = await import('../lib/llm/providers/google.js')
+  const provider = new GoogleAIProvider({ model, apiKey })
+  await provider.validateCredentials()
+}
+
 export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string, model?: string): Promise<void> => {
   if (!apiKey) {
     throw new Error('AI API key is required for OpenAI-compatible models')
@@ -205,10 +235,48 @@ export const checkOpenAiRequirements = async (apiKey: string, baseUrl?: string, 
     throw new Error(`AI API key validation failed: ${msg}`)
   }
 
-  // Only gate on the model when the provider actually returns a list — some
-  // OpenAI-compatible endpoints return nothing, and we shouldn't false-fail there.
-  if (model && modelIds.length > 0 && !modelIds.includes(model)) {
-    throw new Error(`Selected model "${model}" is not available from this provider. Pick a different model with --model.`)
+  // Codex models (codex-mini-latest etc.) are aliases not listed by /v1/models —
+  // skip the presence check for them.
+  const isCodex = model?.includes('codex')
+  if (!isCodex && model && modelIds.length > 0 && !modelIds.includes(model)) {
+    throw new Error(
+      `Selected model "${model}" is not available from this provider. Pick a different model with --model.`,
+    )
+  }
+}
+
+/**
+ * Lists models from any OpenAI-compatible endpoint.
+ * Never throws — returns an empty array when the provider doesn't support the
+ * /models endpoint or when the request fails for any reason.
+ */
+export const fetchOpenAiCompatibleModels = async (apiKey: string, baseUrl?: string): Promise<string[]> => {
+  try {
+    const client = new OpenAI({
+      apiKey,
+      ...(baseUrl ? { baseURL: baseUrl } : {}),
+    })
+    const page = await client.models.list()
+    return page.data.map((m) => m.id)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Lists Codex models available for the given API key.
+ * Tries /v1/models and filters for codex-* entries; falls back to known aliases
+ * because OpenAI does not list alias models in that endpoint.
+ */
+export const fetchCodexModels = async (apiKey: string): Promise<string[]> => {
+  const KNOWN_CODEX_MODELS = ['gpt-5.3-codex', 'gpt-5.1-codex-mini', 'gpt-5.1-codex', 'gpt-5.1-codex-max']
+  try {
+    const client = new OpenAI({ apiKey })
+    const page = await client.models.list()
+    const fromApi = page.data.map((m) => m.id).filter((id) => id.includes('codex'))
+    return fromApi.length > 0 ? fromApi : KNOWN_CODEX_MODELS
+  } catch {
+    return KNOWN_CODEX_MODELS
   }
 }
 
@@ -322,39 +390,20 @@ export interface StreamCallbacks {
   confirmToolCall?: ConfirmToolCallFn
 }
 
-// Tools that must pause and wait for user confirmation before execution
-const CONFIRM_REQUIRED_TOOLS = new Set(['write_patch'])
-
 export const generateChatTitle = async (
   issue: Issue,
   model: string,
   modelKey: string,
   modelUrl?: string,
 ): Promise<string> => {
-  const prompt = buildChatTitlePrompt(issue)
-
   try {
-    if (model === 'claude-code' || isAnthropicModel(model)) {
-      const claudeModel = model === 'claude-code' ? undefined : model
-      return (await runClaudeCodePrompt(prompt, claudeModel)).trim() || issue.title
-    } else {
-      const client = new OpenAI({
-        apiKey: modelKey,
-        ...(modelUrl ? { baseURL: modelUrl } : {}),
-      })
-      const response = await client.chat.completions.create({
-        model,
-        max_tokens: 64,
-        messages: [{ role: 'user', content: prompt }],
-      })
-      return response.choices[0]?.message?.content?.trim() ?? issue.title
-    }
+    const provider = createProvider({ model, apiKey: modelKey, baseUrl: modelUrl })
+    const { text } = await provider.complete({ userMessage: buildChatTitlePrompt(issue), maxTokens: 64 })
+    return text.trim() || issue.title
   } catch {
     return `[${issue.service.serviceName}] ${issue.title}`
   }
 }
-
-const isAnthropicModel = (model: string): boolean => model.startsWith('claude') && model !== 'claude-code'
 
 const findSpanById = (traces: unknown[], targetSpanId: string): any => {
   for (const item of traces as any[]) {
@@ -370,6 +419,33 @@ const findSpanById = (traces: unknown[], targetSpanId: string): any => {
     }
   }
   return undefined
+}
+
+export interface SessionSketch {
+  s3Key: string
+  s3Bucket: string
+  title?: string
+}
+
+/**
+ * Extract browser console log entries from rrweb events.
+ * Only captures type-3 IncrementalSnapshot events with source 14 (Console).
+ * Navigation and input events are intentionally excluded to keep context concise.
+ */
+const extractRrwebConsoleLogs = (events: any[]): string => {
+  const lines: string[] = []
+  const startTime = events[0]?.timestamp ?? 0
+  for (const event of events) {
+    // type 3 = IncrementalSnapshot, source 14 = Console
+    if (event.type !== 3 || event.data?.source !== 14) continue
+    const relMs = event.timestamp - startTime
+    const relSec = (relMs / 1000).toFixed(1)
+    const payload = event.data?.payload
+    const level = (payload?.level ?? 'log') as string
+    const trace = Array.isArray(payload?.trace) ? (payload.trace as unknown[]).join(' ') : String(payload?.trace ?? '')
+    if (trace) lines.push(`[${relSec}s] ${level.toUpperCase()}: ${trace.slice(0, 300)}`)
+  }
+  return lines.join('\n')
 }
 
 export const fetchIssueDebugContext = async (
@@ -447,6 +523,270 @@ export const fetchIssueDebugContext = async (
   }
 }
 
+/**
+ * Fetch all debug context for a known debug session ID. Used when a session
+ * recording is manually attached to an existing chat — we already know the
+ * session; no issue lookup needed.
+ */
+export const fetchDebugSessionContext = async (
+  debugSessionId: string,
+  workspaceId: string,
+  projectId: string,
+  mcpConfig: McpConfig,
+): Promise<{ context: string; sessionSketches: SessionSketch[] } | undefined> => {
+  try {
+    // Fetch the session to find S3 file URLs if available
+    const sessionUrl = new URL(
+      `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}`,
+      mcpConfig.apiUrl,
+    )
+    const sessionRes = await fetch(sessionUrl.toString(), {
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
+    })
+    if (!sessionRes.ok) return undefined
+    const debugSession = (await sessionRes.json()) as any
+
+    let traces: unknown[] = []
+    let logs: unknown[] = []
+
+    if (debugSession.finishedS3Transfer && Array.isArray(debugSession.s3Files)) {
+      const tracesFile = (debugSession.s3Files as any[]).find((f: any) => f.dataType === 'OTLP_TRACES')
+      const logsFile = (debugSession.s3Files as any[]).find((f: any) => f.dataType === 'OTLP_LOGS')
+      const [tracesData, logsData] = await Promise.all([
+        tracesFile?.url ? fetch(tracesFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
+        logsFile?.url ? fetch(logsFile.url).then((r: any) => (r.ok ? r.json() : [])) : Promise.resolve([]),
+      ])
+      traces = Array.isArray(tracesData) ? tracesData : (tracesData?.data ?? [])
+      logs = Array.isArray(logsData) ? logsData : (logsData?.data ?? [])
+    } else {
+      const tracesUrl = new URL(
+        `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-traces`,
+        mcpConfig.apiUrl,
+      )
+      tracesUrl.searchParams.set('skip', '0')
+      tracesUrl.searchParams.set('limit', '300')
+      const logsUrl = new URL(
+        `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-logs`,
+        mcpConfig.apiUrl,
+      )
+      logsUrl.searchParams.set('skip', '0')
+      logsUrl.searchParams.set('limit', '300')
+      const [tracesRes, logsRes] = await Promise.all([
+        fetch(tracesUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
+        fetch(logsUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
+      ])
+      traces = tracesRes.ok ? ((await tracesRes.json()) as any).data : []
+      logs = logsRes.ok ? ((await logsRes.json()) as any).data : []
+    }
+
+    // Fetch rrweb events and session notes in parallel
+    const rrwebUrl = new URL(
+      `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/rrweb-events`,
+      mcpConfig.apiUrl,
+    )
+    rrwebUrl.searchParams.set('limit', '5000')
+    const notesUrl = new URL(
+      `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/session-notes/context`,
+      mcpConfig.apiUrl,
+    )
+    const [rrwebRes, notesRes] = await Promise.all([
+      fetch(rrwebUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
+      fetch(notesUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
+    ])
+    const rawRrweb = rrwebRes.ok ? ((await rrwebRes.json()) as any) : null
+    const notesData: { notes: unknown[]; sketches: SessionSketch[] } | null = notesRes.ok
+      ? ((await notesRes.json()) as any)
+      : null
+
+    const rrwebEvents: unknown[] = Array.isArray(rawRrweb) ? rawRrweb : (rawRrweb?.data ?? [])
+    const rrwebConsoleLogs = extractRrwebConsoleLogs(rrwebEvents)
+    const sessionNotes = notesData?.notes ?? []
+    const sessionSketches: SessionSketch[] = (notesData?.sketches ?? []) as SessionSketch[]
+
+    return {
+      context: JSON.stringify({ sessionId: debugSessionId, traces, logs, sessionNotes, rrwebConsoleLogs }),
+      sessionSketches,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Render a session recording frame at a playback timestamp via the assets service.
+ * Uses the same rrweb + puppeteer pipeline as session note sketch screenshots.
+ */
+export const fetchDebugSessionSnapshot = async (
+  debugSessionId: string,
+  timestampMs: number,
+  workspaceId: string,
+  projectId: string,
+  mcpConfig: McpConfig,
+): Promise<string | undefined> => {
+  try {
+    const url = new URL(
+      `/v0/assets/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/notes/snapshot`,
+      mcpConfig.apiUrl,
+    )
+    url.searchParams.set('timestamp', String(Math.floor(timestampMs)))
+
+    const res = await fetch(url.toString(), {
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
+    })
+    if (!res.ok) {
+      const errorBody = await res.text().catch(() => '')
+      logger.warn(
+        `fetchDebugSessionSnapshot: HTTP ${res.status} for session ${debugSessionId} @ ${timestampMs}ms${errorBody ? `: ${errorBody.slice(0, 200)}` : ''}`,
+      )
+      return undefined
+    }
+
+    const buf = await res.arrayBuffer()
+    const b64 = Buffer.from(buf).toString('base64')
+    return `data:image/jpeg;base64,${b64}`
+  } catch (err) {
+    logger.warn(`fetchDebugSessionSnapshot: ${String(err)}`)
+    return undefined
+  }
+}
+
+/**
+ * Build a standalone context document for a manually-attached debug session
+ * (no issue metadata available).
+ */
+export const buildAttachedSessionContextDoc = (
+  debugSessionId: string,
+  debugContext: string,
+  forIssue = false,
+): string => {
+  let parsedCtx:
+    | { sessionId?: string; traces?: any[]; logs?: any[]; sessionNotes?: any[]; rrwebConsoleLogs?: string }
+    | undefined
+  if (debugContext) {
+    try {
+      parsedCtx = JSON.parse(debugContext)
+    } catch {
+      // non-parseable — proceed without details
+    }
+  }
+
+  const lines: string[] = ['# Attached Session Recording', '', `**Session ID:** \`${debugSessionId}\``]
+
+  const capturedLines: string[] = []
+
+  if (parsedCtx) {
+    capturedLines.push('## Debug Session')
+
+    if (Array.isArray(parsedCtx.sessionNotes) && parsedCtx.sessionNotes.length > 0) {
+      capturedLines.push('', '### Session Notes')
+      for (const note of parsedCtx.sessionNotes as any[]) {
+        const text = note.text ?? note.content ?? JSON.stringify(note)
+        const type = note.type ? `[${note.type}] ` : ''
+        capturedLines.push(`- ${type}${safeCapturedText(text)}`)
+      }
+    }
+
+    if (parsedCtx.rrwebConsoleLogs) {
+      capturedLines.push('', '### Browser Console Logs (from session recording)')
+      capturedLines.push(parsedCtx.rrwebConsoleLogs)
+    }
+
+    if (Array.isArray(parsedCtx.logs) && parsedCtx.logs.length > 0) {
+      capturedLines.push('', `### Logs (${parsedCtx.logs.length} entries)`)
+      const logLines: string[] = []
+      const collectLogs = (items: any[]) => {
+        for (const item of items) {
+          const scopeLogs = item.scopeLogs ?? item.scope_logs ?? []
+          for (const scope of scopeLogs) {
+            for (const record of scope.logRecords ?? scope.log_records ?? []) {
+              const severity = record.severityText ?? record.severity_text ?? ''
+              const body = record.body?.stringValue ?? record.body?.string_value ?? record.body ?? ''
+              if (body) logLines.push(`- **[${safeCapturedText(severity)}]** ${safeCapturedText(body, 200)}`)
+            }
+          }
+        }
+      }
+      collectLogs(parsedCtx.logs)
+      capturedLines.push(...logLines.slice(0, 30))
+      if (logLines.length > 30) capturedLines.push(`  … and ${logLines.length - 30} more log entries`)
+    }
+
+    if (Array.isArray(parsedCtx.traces) && parsedCtx.traces.length > 0) {
+      capturedLines.push(
+        '',
+        '### Raw OTLP Spans',
+        '```json',
+        JSON.stringify(sanitizeCapturedValue(parsedCtx.traces), null, 2),
+        '```',
+      )
+    }
+  }
+
+  if (capturedLines.length > 0) {
+    lines.push('', '## Captured Observability Data', wrapUntrustedObservabilityData(capturedLines.join('\n')))
+  }
+
+  lines.push('', '---', forIssue ? '*Generated by multiplayer debugging agent*' : '*Session recording context*')
+  return lines.join('\n')
+}
+
+const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'])
+
+/**
+ * Fetches the content of user-uploaded file attachments so the LLM can see them.
+ * - Images: returned as base64 data URLs for vision-capable models.
+ * - Text/code files: returned as labelled text blocks appended to message content.
+ *
+ * `mimeType` on the attachment is used first; the response `Content-Type` header is
+ * consulted as a fallback when `mimeType` is absent so images are never mis-classified.
+ * Silently skips attachments that fail to fetch.
+ */
+export const fetchAttachmentContent = async (
+  attachments: Array<{ name: string; url?: string; mimeType?: string }>,
+): Promise<{ textBlocks: string[]; images: string[] }> => {
+  const textBlocks: string[] = []
+  const images: string[] = []
+
+  await Promise.all(
+    attachments.map(async (attachment) => {
+      const { url, name, mimeType } = attachment
+      if (!url) return
+
+      try {
+        const res = await fetch(url)
+        if (!res.ok) {
+          logger.warn(`fetchAttachmentContent: failed to fetch "${name}" — HTTP ${res.status} (URL may have expired)`)
+          return
+        }
+
+        // Prefer the declared mimeType; fall back to Content-Type so images with a
+        // missing or generic mimeType (e.g. "application/octet-stream") are still
+        // treated as images when the server sends the correct Content-Type.
+        const contentTypeHeader = res.headers.get('content-type') ?? ''
+        const effectiveMimeType = mimeType || contentTypeHeader.split(';')[0]!.trim()
+
+        if (effectiveMimeType && IMAGE_MIME_TYPES.has(effectiveMimeType)) {
+          const buf = await res.arrayBuffer()
+          const b64 = Buffer.from(buf).toString('base64')
+          // Use the effective mimeType so the data URL is always valid
+          images.push(`data:${effectiveMimeType};base64,${b64}`)
+        } else {
+          // Treat everything else as text (code, logs, plain text, etc.)
+          const text = await res.text()
+          if (text.trim()) {
+            textBlocks.push(`<attachment name="${name}">\n${text.slice(0, 50_000)}\n</attachment>`)
+          }
+        }
+      } catch (err) {
+        // Non-fatal — log and continue so the text portion still reaches the agent
+        logger.warn(`fetchAttachmentContent: error fetching "${name}": ${String(err)}`)
+      }
+    }),
+  )
+
+  return { textBlocks, images }
+}
+
 export interface IssueAnalysis {
   fixabilityScore: number
   severity: 'high' | 'medium' | 'low'
@@ -458,36 +798,17 @@ export const analyseIssueContext = async (
   modelKey: string,
   modelUrl?: string,
 ): Promise<IssueAnalysis> => {
-  const systemPrompt = ANALYSE_ISSUE_SYSTEM_PROMPT
-  const userMessage = buildAnalyseIssueUserMessage(markdown)
-
   try {
-    if (model === 'claude-code' || isAnthropicModel(model)) {
-      const claudeModel = model === 'claude-code' ? undefined : model
-      const text = await runClaudeCodePrompt(`${systemPrompt}\n\n${userMessage}`, claudeModel)
-      return JSON.parse(text) as IssueAnalysis
-    }
-
-    const openai = new OpenAI({
-      apiKey: modelKey,
-      ...(modelUrl ? { baseURL: modelUrl } : {}),
+    const provider = createProvider({ model, apiKey: modelKey, baseUrl: modelUrl })
+    const { text } = await provider.complete({
+      systemPrompt: ANALYSE_ISSUE_SYSTEM_PROMPT,
+      userMessage: buildAnalyseIssueUserMessage(markdown),
+      maxTokens: 100,
     })
-    const response = await openai.chat.completions.create({
-      model,
-      max_tokens: 100,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
-    })
-    const text = response.choices[0]?.message?.content ?? ''
     return JSON.parse(text) as IssueAnalysis
   } catch {
     // Fall back to a conservative default so the agent still runs
-    return {
-      fixabilityScore: 70,
-      severity: 'medium',
-    }
+    return { fixabilityScore: 70, severity: 'medium' }
   }
 }
 
@@ -711,575 +1032,171 @@ export const buildIssueContextDoc = (
 
 export { buildIssuePromptFallback }
 
-const readFileSafe = (projectDir: string, filePath: string): string => {
+const makeDebugSessionApiCall = async (url: URL, mcpConfig: McpConfig): Promise<CallToolResult> => {
   try {
-    const resolved = path.resolve(projectDir, filePath)
-    // Security: ensure the resolved path is within the project directory
-    if (!resolved.startsWith(path.resolve(projectDir))) {
-      return 'Error: Access denied - path outside project directory'
-    }
-    if (!fs.existsSync(resolved)) {
-      return `Error: File not found: ${filePath}`
-    }
-    const stat = fs.statSync(resolved)
-    if (stat.isDirectory()) {
-      const entries = fs.readdirSync(resolved).slice(0, 50)
-      return `Directory contents:\n${entries.join('\n')}`
-    }
-    const content = fs.readFileSync(resolved, 'utf-8')
-    if (content.length > MAX_FILE_SIZE) {
-      return content.slice(0, MAX_FILE_SIZE) + `\n\n[... truncated at ${MAX_FILE_SIZE} chars ...]`
-    }
-    return content
-  } catch (err: any) {
-    return `Error reading file: ${err.message}`
-  }
-}
-
-const applyPatches = (projectDir: string, patches: FilePatch[]): void => {
-  for (const patch of patches) {
-    const resolved = path.resolve(projectDir, patch.filePath)
-    if (!resolved.startsWith(path.resolve(projectDir))) {
-      throw new Error(`Security: patch path ${patch.filePath} is outside project directory`)
-    }
-    const dir = path.dirname(resolved)
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(resolved, patch.newContent, 'utf-8')
-  }
-}
-
-const openAiTools: OpenAI.Chat.ChatCompletionTool[] = [
-  {
-    type: 'function',
-    function: {
-      name: 'read_file',
-      description: 'Read the content of a file or directory in the project',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: {
-            type: 'string',
-            description: 'Relative path from the project root',
-          },
-        },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'write_patch',
-      description: 'Write the final list of file patches to fix the issue',
-      parameters: {
-        type: 'object',
-        properties: {
-          patches: {
-            type: 'array',
-            description: 'List of file patches',
-            items: {
-              type: 'object',
-              properties: {
-                filePath: { type: 'string' },
-                newContent: { type: 'string' },
-              },
-              required: ['filePath', 'newContent'],
-            },
-          },
-        },
-        required: ['patches'],
-      },
-    },
-  },
-]
-
-// ─── Shared Claude Code stream processing ─────────────────────────────────────
-
-type PendingToolCall = { id: string; name: string; inputJson: string }
-type RunningToolCall = { name: string; input: Record<string, unknown> }
-
-/**
- * Processes a user message from the Claude SDK, extracting tool results and
- * firing the onToolCallResult callback for any completed tool calls.
- */
-const processClaudeToolResults = (
-  msg: any,
-  callbacks: StreamCallbacks,
-  runningToolCalls: Map<string, RunningToolCall>,
-): void => {
-  if (msg.type !== 'user' || !callbacks.onToolCallResult || !Array.isArray(msg.message?.content)) return
-
-  for (const block of msg.message.content) {
-    if (block.type !== 'tool_result') continue
-    const id = block.tool_use_id as string
-    const data = runningToolCalls.get(id)
-    if (!data) continue
-
-    const outputContent = Array.isArray(block.content)
-      ? block.content.map((c: any) => c.text ?? '').join('')
-      : typeof block.content === 'string'
-        ? block.content
-        : ''
-
-    callbacks.onToolCallResult({
-      id,
-      ...data,
-      status: block.is_error ? 'failed' : 'succeeded',
-      output: { content: outputContent },
+    const res = await fetch(url.toString(), {
+      headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
     })
-    runningToolCalls.delete(id)
+    if (!res.ok) {
+      return { content: [{ type: 'text', text: `API error ${res.status}: ${res.statusText}` }], isError: true }
+    }
+    const data = await res.json()
+    return { content: [{ type: 'text', text: JSON.stringify(data) }] }
+  } catch (err) {
+    return {
+      content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+      isError: true,
+    }
   }
 }
 
 /**
- * Processes a single stream_event from the Claude SDK, updating streaming state
- * and firing progress/tool callbacks. Pass onText to accumulate assistant text.
+ * Builds an in-process MCP server exposing 4 granular debug-session tools.
+ * The LLM calls whichever tools it needs on demand instead of loading everything upfront.
  */
-const processClaudeStreamEvent = (
-  event: any,
-  callbacks: StreamCallbacks,
-  pendingToolCallRef: { current: PendingToolCall | null },
-  runningToolCalls: Map<string, RunningToolCall>,
-  onText?: (text: string) => void,
-): void => {
-  if (event.type === 'message_start') {
-    callbacks.onTurnStart?.()
-    // Flush any tool calls that never received a dedicated tool_result message
-    if (callbacks.onToolCallResult) {
-      for (const [id, data] of runningToolCalls) {
-        callbacks.onToolCallResult({ id, ...data, status: 'succeeded' })
-      }
-      runningToolCalls.clear()
-    }
-  } else if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
-    if (callbacks.onToolCall || callbacks.onToolCallResult) {
-      pendingToolCallRef.current = {
-        id: event.content_block.id,
-        name: event.content_block.name,
-        inputJson: '',
-      }
-    }
-  } else if (event.type === 'content_block_delta') {
-    if (event.delta?.type === 'text_delta') {
-      callbacks.onProgress?.(event.delta.text)
-      onText?.(event.delta.text)
-    } else if (event.delta?.type === 'input_json_delta' && pendingToolCallRef.current) {
-      pendingToolCallRef.current.inputJson += event.delta.partial_json ?? ''
-    }
-  } else if (event.type === 'content_block_stop' && pendingToolCallRef.current) {
-    let input: Record<string, unknown>
-    try {
-      input = pendingToolCallRef.current.inputJson ? JSON.parse(pendingToolCallRef.current.inputJson) : {}
-    } catch {
-      input = {}
-    }
-    callbacks.onToolCall?.({
-      id: pendingToolCallRef.current.id,
-      name: pendingToolCallRef.current.name,
-      input,
-    })
-    if (callbacks.onToolCallResult) {
-      runningToolCalls.set(pendingToolCallRef.current.id, {
-        name: pendingToolCallRef.current.name,
-        input,
-      })
-    }
-    pendingToolCallRef.current = null
-  }
-}
+export const buildDebugSessionMcpServer = (
+  mcpConfig: McpConfig,
+  workspaceId: string,
+  projectId: string,
+): McpServerConfig => {
+  const base = `${mcpConfig.apiUrl}/v0/radar/workspaces/${workspaceId}/projects/${projectId}`
+  const debugSessionId = z.string().describe('The debug session ID')
 
-// ─── OpenAI tool loop ─────────────────────────────────────────────────────────
-
-const runOpenAiLoop = async (
-  client: OpenAI,
-  model: string,
-  messages: OpenAI.Chat.ChatCompletionMessageParam[],
-  projectDir: string,
-  abortSignal: AbortSignal | undefined,
-  callbacks: StreamCallbacks,
-  handleExtraTool?: (name: string, input: Record<string, unknown>) => Promise<string>,
-): Promise<{ patches: FilePatch[]; finalContent: string }> => {
-  const { onProgress, onToolCall, onToolCallResult, onTurnStart, confirmToolCall } = callbacks
-  let filesRead = 0
-  let patches: FilePatch[] = []
-  let finalContent = ''
-
-  for (let i = 0; i < 20; i++) {
-    if (abortSignal?.aborted) {
-      onProgress?.('aborted')
-      break
-    }
-
-    onTurnStart?.()
-    onProgress?.(`Thinking (turn ${i + 1})...`)
-
-    const response = await client.chat.completions.create({
-      model,
-      messages,
-      tools: openAiTools,
-      tool_choice: 'auto',
-    })
-
-    const choice = response.choices[0]
-    if (!choice) break
-
-    if (choice.message.content) {
-      finalContent += choice.message.content
-      onProgress?.(choice.message.content)
-    }
-
-    messages.push(choice.message as OpenAI.Chat.ChatCompletionMessageParam)
-
-    if (choice.finish_reason === 'stop') {
-      break
-    }
-
-    if (choice.finish_reason === 'tool_calls' && choice.message.tool_calls) {
-      for (const toolCall of choice.message.tool_calls) {
-        if (toolCall.type !== 'function') continue
-        let result: string
-        let toolInput: Record<string, unknown> = {}
-        let toolStatus: 'succeeded' | 'failed' = 'succeeded'
-
-        if (toolCall.function.name === 'read_file') {
-          toolInput = JSON.parse(toolCall.function.arguments) as {
-            path: string
-          }
-          onProgress?.(`[read] ${(toolInput as { path: string }).path}`)
-          onToolCall?.({
-            id: toolCall.id,
-            name: toolCall.function.name,
-            input: toolInput,
-          })
-          filesRead++
-          result =
-            filesRead <= MAX_FILES_TO_READ
-              ? readFileSafe(projectDir, (toolInput as { path: string }).path)
-              : 'Error: Maximum file reads reached'
-          if (result.startsWith('Error:')) toolStatus = 'failed'
-        } else if (toolCall.function.name === 'write_patch') {
-          toolInput = JSON.parse(toolCall.function.arguments) as {
-            patches: FilePatch[]
-          }
-          onToolCall?.({
-            id: toolCall.id,
-            name: toolCall.function.name,
-            input: toolInput,
-          })
-
-          if (confirmToolCall && CONFIRM_REQUIRED_TOOLS.has('write_patch')) {
-            onProgress?.('[patch] Waiting for user confirmation...')
-            const { approved, userResponse } = await confirmToolCall(toolCall.id, 'write_patch', toolInput)
-            if (!approved) {
-              result = userResponse ?? 'Patch rejected by user'
-              toolStatus = 'failed'
-            } else {
-              patches = (toolInput as { patches: FilePatch[] }).patches
-              onProgress?.(`[patch] Writing ${patches.length} file(s)`)
-              result = `Patches recorded: ${patches.length} file(s)`
-            }
-          } else {
-            patches = (toolInput as { patches: FilePatch[] }).patches
-            onProgress?.(`[patch] Writing ${patches.length} file(s)`)
-            result = `Patches recorded: ${patches.length} file(s)`
-          }
-        } else if (handleExtraTool) {
-          toolInput = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
-          onToolCall?.({
-            id: toolCall.id,
-            name: toolCall.function.name,
-            input: toolInput,
-          })
-          onProgress?.(`[${toolCall.function.name}] fetching...`)
-          try {
-            result = await handleExtraTool(toolCall.function.name, toolInput)
-          } catch (err: any) {
-            result = `Error: ${err.message}`
-            toolStatus = 'failed'
-          }
-        } else {
-          toolInput = JSON.parse(toolCall.function.arguments) as Record<string, unknown>
-          onToolCall?.({
-            id: toolCall.id,
-            name: toolCall.function.name,
-            input: toolInput,
-          })
-          result = `Unknown tool: ${toolCall.function.name}`
-          toolStatus = 'failed'
-        }
-
-        onToolCallResult?.({
-          id: toolCall.id,
-          name: toolCall.function.name,
-          input: toolInput,
-          status: toolStatus,
-          output: { content: result },
-        })
-
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: result,
-        })
-      }
-
-      if (patches.length > 0) {
-        break
-      }
-    }
-  }
-
-  return { patches, finalContent }
-}
-
-// ─── OpenAI-compatible implementation ────────────────────────────────────────
-
-const resolveIssueWithOpenAI = async (
-  _issue: Issue,
-  projectDir: string,
-  prompt: string,
-  model: string,
-  apiKey: string,
-  baseUrl: string | undefined,
-  abortSignal: AbortSignal | undefined,
-  callbacks: StreamCallbacks,
-  isDemoProject?: boolean,
-): Promise<FilePatch[]> => {
-  const client = new OpenAI({
-    apiKey,
-    ...(baseUrl ? { baseURL: baseUrl } : {}),
-  })
-
-  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildDebuggingSystemPrompt(undefined, isDemoProject) },
-    { role: 'user', content: prompt },
-  ]
-
-  const { patches } = await runOpenAiLoop(client, model, messages, projectDir, abortSignal, callbacks)
-  return patches
-}
-
-// ─── Claude Code implementation ───────────────────────────────────────────────
-
-const runClaudeCodePrompt = async (prompt: string, model?: string): Promise<string> => {
-  let text = ''
-  for await (const message of query({
-    prompt,
-    options: {
-      cwd: process.cwd(),
-      executable: 'node',
-      pathToClaudeCodeExecutable: cliPath,
-      permissionMode: 'acceptEdits',
-      settingSources: [],
-      maxTurns: 1,
-      ...(model ? { model } : {}),
+  const tracesTool = tool(
+    'get_debug_session_traces',
+    'Fetch OTLP traces for a Multiplayer debug session.',
+    { debugSessionId },
+    async ({ debugSessionId: id }): Promise<CallToolResult> => {
+      const url = new URL(`${base}/debug-sessions/${id}/otel-traces`)
+      url.searchParams.set('skip', '0')
+      url.searchParams.set('limit', '300')
+      return makeDebugSessionApiCall(url, mcpConfig)
     },
-  })) {
-    const msg = message as any
-    if (msg.type === 'result' && msg.subtype === 'success') {
-      text = msg.result ?? ''
-    }
-  }
-  return text
-}
-
-const resolveIssueWithClaudeCode = async (
-  _issue: Issue,
-  projectDir: string,
-  prompt: string,
-  model: string | undefined,
-  abortSignal: AbortSignal | undefined,
-  callbacks: StreamCallbacks,
-  isDemoProject?: boolean,
-): Promise<FilePatch[]> => {
-  const absProjectDir = path.resolve(projectDir)
-  const git = simpleGit(absProjectDir)
-
-  const pendingToolCall: { current: PendingToolCall | null } = {
-    current: null,
-  }
-  const runningToolCalls = new Map<string, RunningToolCall>()
-
-  callbacks.onProgress?.(`[claude] starting (cwd=${absProjectDir}, cli=${cliPath})`)
-
-  // Replace OpenAI-path patch language with direct-edit instructions for Claude Code
-  const claudePrompt = prompt.replace(
-    /please analyze this issue and produce file patches to fix it\. read relevant source files based on the stacktrace and error details above\./gi,
-    'Fix the issue by directly editing the relevant source files using the Edit or Write tools. Read the relevant source files based on the stacktrace and error details above, then apply the fix.',
   )
 
-  for await (const message of query({
-    prompt: claudePrompt,
-    options: {
-      cwd: absProjectDir,
-      executable: 'node',
-      pathToClaudeCodeExecutable: cliPath,
-      permissionMode: 'acceptEdits',
-      settingSources: [],
-      settings: {
-        claudeMdExcludes: ['**'],
-        permissions: {
-          allow: ['Bash(*)'],
-        },
-      },
-      systemPrompt: {
-        type: 'preset',
-        preset: 'claude_code',
-        append: buildClaudeCodeDebuggingSystemPrompt(absProjectDir, isDemoProject),
-      },
-      maxTurns: 1000,
-      includePartialMessages: !!(callbacks.onProgress || callbacks.onToolCall),
-      ...(model ? { model } : {}),
-      stderr: (data: string) => {
-        const line = data.trim()
-        if (line) callbacks.onProgress?.(`[claude stderr] ${line}`)
-      },
+  const logsTool = tool(
+    'get_debug_session_logs',
+    'Fetch OTLP logs for a Multiplayer debug session.',
+    { debugSessionId },
+    async ({ debugSessionId: id }): Promise<CallToolResult> => {
+      const url = new URL(`${base}/debug-sessions/${id}/otel-logs`)
+      url.searchParams.set('skip', '0')
+      url.searchParams.set('limit', '300')
+      return makeDebugSessionApiCall(url, mcpConfig)
     },
-  })) {
-    if (abortSignal?.aborted) {
-      callbacks.onProgress?.('[aborted]')
-      break
-    }
+  )
 
-    const msg = message as any
+  const notesTool = tool(
+    'get_debug_session_notes',
+    'Fetch session notes and sketches for a Multiplayer debug session.',
+    { debugSessionId },
+    async ({ debugSessionId: id }): Promise<CallToolResult> => {
+      const url = new URL(`${base}/debug-sessions/${id}/session-notes/context`)
+      return makeDebugSessionApiCall(url, mcpConfig)
+    },
+  )
 
-    processClaudeToolResults(msg, callbacks, runningToolCalls)
+  const rrwebTool = tool(
+    'get_debug_session_rrweb_timeline',
+    'Fetch the rrweb UI recording timeline for a Multiplayer debug session.',
+    { debugSessionId },
+    async ({ debugSessionId: id }): Promise<CallToolResult> => {
+      const url = new URL(`${base}/debug-sessions/${id}/rrweb-events`)
+      url.searchParams.set('limit', '5000')
+      return makeDebugSessionApiCall(url, mcpConfig)
+    },
+  )
 
-    if (msg.type === 'stream_event') {
-      processClaudeStreamEvent(msg.event, callbacks, pendingToolCall, runningToolCalls)
-    } else if (callbacks.onProgress) {
-      if (msg.type === 'tool_progress') {
-        callbacks.onProgress(`[${msg.tool_name}] ${msg.elapsed_time_seconds.toFixed(1)}s...`)
-      } else if (msg.type === 'system' && msg.subtype === 'task_progress') {
-        callbacks.onProgress(msg.description)
-      } else if (msg.type === 'result') {
-        callbacks.onProgress(msg.subtype)
-      }
-    }
-
-    if (message.type === 'result' && message.subtype !== 'success') {
-      const msg = message as any
-      const errors: string[] = msg.errors ?? []
-      const detail = errors.length > 0 ? `\n${errors.join('\n')}` : ''
-      const subtypeLabel: Record<string, string> = {
-        error_during_execution: 'Error during execution',
-        error_max_turns: 'Max turns reached',
-        error_max_budget_usd: 'Budget limit exceeded',
-        error_max_structured_output_retries: 'Structured output retries exceeded',
-      }
-      const label = subtypeLabel[msg.subtype] ?? msg.subtype
-      throw new Error(`Claude Code process exited: ${label}${detail}`)
-    }
-  }
-
-  if (abortSignal?.aborted) return []
-
-  const status = await git.status()
-  const changedFiles = [...status.modified, ...status.created, ...status.not_added]
-
-  return changedFiles.map((filePath) => ({
-    filePath,
-    newContent: fs.readFileSync(path.resolve(absProjectDir, filePath), 'utf-8'),
-  }))
-}
-
-// ─── Continue chat (multi-turn) ───────────────────────────────────────────────
-
-const continueChatWithOpenAI = async (
-  history: ConversationMessage[],
-  projectDir: string,
-  model: string,
-  apiKey: string,
-  baseUrl: string | undefined,
-  abortSignal: AbortSignal | undefined,
-  callbacks: StreamCallbacks,
-): Promise<string> => {
-  const client = new OpenAI({
-    apiKey,
-    ...(baseUrl ? { baseURL: baseUrl } : {}),
+  return createSdkMcpServer({
+    name: 'multiplayer-debug-sessions',
+    version: '1.0.0',
+    tools: [tracesTool, logsTool, notesTool, rrwebTool],
   })
-
-  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: 'system', content: buildDebuggingSystemPrompt() },
-    ...history.map(
-      (m) =>
-        ({
-          role: m.role,
-          content: m.content,
-        }) as OpenAI.Chat.ChatCompletionMessageParam,
-    ),
-  ]
-
-  const { finalContent } = await runOpenAiLoop(client, model, messages, projectDir, abortSignal, callbacks)
-  return finalContent
 }
 
-const continueChatWithClaudeCode = async (
-  history: ConversationMessage[],
+/**
+ * Starts a Claude session seeded with a debug session analysis prompt.
+ * The agent uses MCP tools to fetch traces/logs/notes/rrweb on demand.
+ */
+export const startDebugSessionChat = async (
+  debugSessionId: string,
   projectDir: string,
-  model: string | undefined,
+  mcpConfig: McpConfig,
+  workspaceId: string,
+  projectId: string,
+  model: string,
+  modelKey: string,
+  modelUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
 ): Promise<string> => {
-  if (!history.length) {
-    throw new Error('EMPTY_HISTORY')
+  const seedPrompt = `Debug session \`${debugSessionId}\` has been opened. Use the available tools (\`get_debug_session_traces\`, \`get_debug_session_logs\`, \`get_debug_session_notes\`, \`get_debug_session_rrweb_timeline\`) to investigate this session and provide a comprehensive summary: what happened, any errors or anomalies, and notable user interactions.`
+  const history: ConversationMessage[] = [{ role: 'user', content: seedPrompt }]
+  const mcpServers = {
+    'multiplayer-debug-sessions': buildDebugSessionMcpServer(mcpConfig, workspaceId, projectId),
   }
-  const contextLines = history.slice(0, -1).map((m) => `<${m.role}>\n${m.content}\n</${m.role}>`)
-  const lastMessage = history[history.length - 1]
+  return continueChat(history, projectDir, model, modelKey, modelUrl, abortSignal, callbacks, {
+    mcpServers,
+    sessionMode: 'interactive',
+  })
+}
 
-  const prompt =
-    contextLines.length > 0
-      ? `<conversation_history>\n${contextLines.join('\n\n')}\n</conversation_history>\n\n${lastMessage?.content}`
-      : (lastMessage?.content as string)
+// ─── Event → callback adapter ─────────────────────────────────────────────────
 
-  let response = ''
-  const pendingToolCall: { current: PendingToolCall | null } = {
-    current: null,
-  }
-  const runningToolCalls = new Map<string, RunningToolCall>()
+/**
+ * Iterates over provider events and dispatches them to the StreamCallbacks that
+ * the rest of the application uses. This is the only place that knows about
+ * both the library's event model and the application's callback model.
+ *
+ * Returns the final text and any patches collected during the session.
+ */
+async function dispatchAgentEvents(
+  events: AsyncIterable<AgentStreamEvent>,
+  callbacks: StreamCallbacks,
+): Promise<{ finalText: string; patches: FilePatch[] }> {
+  let finalText = ''
+  const patches: FilePatch[] = []
 
-  for await (const message of query({
-    prompt,
-    options: {
-      cwd: projectDir,
-      executable: 'node',
-      pathToClaudeCodeExecutable: cliPath,
-      permissionMode: 'bypassPermissions',
-      systemPrompt: buildDebuggingSystemPrompt(projectDir),
-      maxTurns: 250,
-      includePartialMessages: !!(callbacks.onProgress || callbacks.onToolCall || callbacks.onToolCallResult),
-      ...(model ? { model } : {}),
-      stderr: (data: string) => {
-        const line = data.trim()
-        if (line) callbacks.onProgress?.(`[claude stderr] ${line}`)
-      },
-    },
-  })) {
-    if (abortSignal?.aborted) {
-      callbacks.onProgress?.('[aborted]')
-      break
+  for await (const event of events) {
+    switch (event.type) {
+      case 'turn_start':
+        callbacks.onTurnStart?.()
+        break
+      case 'text_delta':
+        callbacks.onProgress?.(event.text)
+        break
+      case 'tool_call':
+        callbacks.onToolCall?.(event)
+        break
+      case 'tool_result':
+        callbacks.onToolCallResult?.(event)
+        break
+      case 'progress':
+        callbacks.onProgress?.(event.message)
+        break
+      case 'patch':
+        patches.push(...event.patches)
+        break
+      case 'done':
+        finalText = event.finalText
+        break
+      case 'aborted':
+        callbacks.onProgress?.('[aborted]')
+        break
+      case 'error':
+        throw event.error
+      // 'tool_confirm' is emitted before the provider calls confirmToolCall —
+      // the UI reacts to the tool_call event instead, so no action needed here.
     }
-
-    const msg = message as any
-
-    processClaudeToolResults(msg, callbacks, runningToolCalls)
-
-    if (msg.type === 'stream_event') {
-      processClaudeStreamEvent(msg.event, callbacks, pendingToolCall, runningToolCalls, (text) => {
-        response += text
-      })
-    } else if (msg.type === 'result') {
-      callbacks.onProgress?.('')
-    }
   }
 
-  return response
+  return { finalText, patches }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export const resolveIssue = async (
-  issue: Issue,
+  _issue: Issue,
   projectDir: string,
   prompt: string,
   model: string,
@@ -1289,28 +1206,18 @@ export const resolveIssue = async (
   callbacks: StreamCallbacks,
   isDemoProject?: boolean,
 ): Promise<FilePatch[]> => {
-  if (model === 'claude-code' || isAnthropicModel(model)) {
-    // Claude Code SDK handles tool execution internally — confirmation dialogs are not supported
-    const claudeModel = model === 'claude-code' ? undefined : model
-    return resolveIssueWithClaudeCode(issue, projectDir, prompt, claudeModel, abortSignal, callbacks, isDemoProject)
-  }
-
-  const patches = await resolveIssueWithOpenAI(
-    issue,
-    projectDir,
-    prompt,
-    model,
-    modelKey,
-    modelUrl,
-    abortSignal,
+  const provider = createProvider({ model, apiKey: modelKey, baseUrl: modelUrl })
+  const { patches } = await dispatchAgentEvents(
+    provider.runAgentic({
+      history: [{ role: 'user', content: prompt }],
+      projectDir,
+      confirmToolCall: callbacks.confirmToolCall,
+      abortSignal,
+      isFixFlow: true,
+      isDemoProject,
+    }),
     callbacks,
-    isDemoProject,
   )
-
-  if (patches.length > 0) {
-    applyPatches(projectDir, patches)
-  }
-
   return patches
 }
 
@@ -1322,42 +1229,22 @@ export const generatePrContent = async (
   modelKey?: string,
   modelUrl?: string,
 ): Promise<{ title: string; body: string }> => {
-  const systemPrompt = PR_GENERATION_SYSTEM_PROMPT
-
   const conversationContext = history
     .map((m) => `[${m.role}]: ${m.content}`)
     .join('\n\n')
     .slice(0, 4000)
 
-  const userMessage = buildPrUserMessage(issue, conversationContext, diffStats)
-
   try {
-    let text: string
-    if (model === 'claude-code' || isAnthropicModel(model)) {
-      const claudeModel = model === 'claude-code' ? undefined : model
-      text = await runClaudeCodePrompt(`${systemPrompt}\n\n${userMessage}`, claudeModel)
-    } else {
-      const openai = new OpenAI({
-        apiKey: modelKey,
-        ...(modelUrl ? { baseURL: modelUrl } : {}),
-      })
-      const response = await openai.chat.completions.create({
-        model,
-        max_tokens: 1024,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMessage },
-        ],
-      })
-      text = response.choices[0]?.message?.content ?? ''
-    }
+    const provider = createProvider({ model, apiKey: modelKey ?? '', baseUrl: modelUrl })
+    const { text } = await provider.complete({
+      systemPrompt: PR_GENERATION_SYSTEM_PROMPT,
+      userMessage: buildPrUserMessage(issue, conversationContext, diffStats),
+      maxTokens: 1024,
+    })
     const match = text.match(/\{[\s\S]*\}/)
-
     if (match) {
       const parsed = JSON.parse(match[0]) as { title?: string; body?: string }
-      if (parsed.title && parsed.body) {
-        return { title: parsed.title, body: parsed.body }
-      }
+      if (parsed.title && parsed.body) return { title: parsed.title, body: parsed.body }
     }
   } catch {
     // Fall through to default
@@ -1365,11 +1252,14 @@ export const generatePrContent = async (
 
   return {
     title: `fix: ${issue.title}`,
-    body: `Fixes issue \`${issue.componentHash}\`.
-    \n\nChanges: +${diffStats.additions}/-${diffStats.deletions} lines.
-    [issue](${issue.url})
-    `,
+    body: `Fixes issue \`${issue.componentHash}\`.\n\nChanges: +${diffStats.additions}/-${diffStats.deletions} lines.\n[issue](${issue.url})`,
   }
+}
+
+export interface ContinueChatOptions {
+  sessionMode: AgentSessionMode
+  isDemoProject?: boolean
+  mcpServers?: Record<string, McpServerConfig>
 }
 
 export const continueChat = async (
@@ -1380,10 +1270,34 @@ export const continueChat = async (
   modelUrl: string | undefined,
   abortSignal: AbortSignal | undefined,
   callbacks: StreamCallbacks,
+  options: ContinueChatOptions,
 ): Promise<string> => {
-  if (model === 'claude-code' || isAnthropicModel(model)) {
-    const claudeModel = model === 'claude-code' ? undefined : model
-    return continueChatWithClaudeCode(history, projectDir, claudeModel, abortSignal, callbacks)
-  }
-  return continueChatWithOpenAI(history, projectDir, model, modelKey, modelUrl, abortSignal, callbacks)
+  const provider = createProvider({ model, apiKey: modelKey, baseUrl: modelUrl })
+  const llmHistory = history.map((m) => ({ role: m.role, content: m.content, images: m.images }))
+  const absProjectDir = projectDir
+  const systemPrompt = buildSystemPromptForMode(
+    options.sessionMode,
+    absProjectDir,
+    options.isDemoProject,
+    isAnthropicModel(model),
+  )
+  // For non-Anthropic models (Gemini, OpenAI, Codex) in issue_fix mode,
+  // write_patch calls should actually be applied to disk. Anthropic uses
+  // its own native Edit/Write tools and doesn't go through isFixFlow.
+  const isFixFlow = options.sessionMode === 'issue_fix' && !isAnthropicModel(model)
+
+  const { finalText } = await dispatchAgentEvents(
+    provider.runAgentic({
+      history: llmHistory,
+      projectDir: absProjectDir,
+      systemPrompt,
+      mcpServers: options.mcpServers,
+      confirmToolCall: callbacks.confirmToolCall,
+      abortSignal,
+      isDemoProject: options.isDemoProject,
+      isFixFlow,
+    }),
+    callbacks,
+  )
+  return finalText
 }

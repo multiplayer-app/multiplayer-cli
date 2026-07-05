@@ -1,4 +1,6 @@
-import type { ReactElement, ReactNode } from 'react'
+import { useMemo, useRef, type ReactElement, type ReactNode } from 'react'
+import { ScrollBoxRenderable } from '@opentui/core'
+import { useFocusZone, useListNavigation } from '../lib/focus/index.js'
 import { tuiAttrs } from '../lib/tuiAttrs.js'
 import { openUrl } from '../lib/openUrl.js'
 import { clickHandler } from './shared/clickHandler.js'
@@ -7,7 +9,7 @@ import type { SessionDetail, SessionStatus, RateLimitState } from '../runtime/ty
 import type { AgentChatStatus } from '../types/index.js'
 import type { GitSettings } from '../cli/profile.js'
 import { GitModeSection } from './shared/GitModeSection.js'
-import { PRODUCTION_HOSTNAME, PRODUCTION_WEB_HOSTNAME } from '../config.js'
+import { getWebBaseUrl } from '../config.js'
 import type { DemoStatus } from '../lib/demoProcess.js'
 import {
   ACCENT,
@@ -27,6 +29,11 @@ import {
 } from './shared/tuiTheme.js'
 
 const SIDEBAR_WIDTH = 30
+
+const SIDEBAR_ZONE_HINTS = [
+  { id: 'nav', keys: '↑↓', label: 'select' },
+  { id: 'enter', keys: '↵', label: 'activate' }
+] as const
 
 const SIDEBAR_SCROLL_STYLE = {
   wrapperOptions: { flexGrow: 1 },
@@ -67,7 +74,6 @@ interface Props {
   activeCount: number
   resolvedCount: number
   gitSettings?: GitSettings
-  isFocused: boolean
   onOpenSettings?: () => void
   isDemoProject?: boolean
   demoStatus?: DemoStatus
@@ -115,16 +121,6 @@ function timeAgo(date: Date): string {
   return `${hours}h ago`
 }
 
-function getWebBaseUrl(apiUrl?: string): string {
-  if (!apiUrl) return `https://${PRODUCTION_WEB_HOSTNAME}`
-  try {
-    const { hostname } = new URL(apiUrl)
-    if (hostname === PRODUCTION_HOSTNAME) return `https://${PRODUCTION_WEB_HOSTNAME}`
-    return new URL(apiUrl).origin
-  } catch {
-    return `https://${PRODUCTION_WEB_HOSTNAME}`
-  }
-}
 
 const getBrowserUrl = (
   workspaceId?: string,
@@ -159,7 +155,6 @@ function ContextSidebarImpl({
   activeCount,
   resolvedCount,
   gitSettings,
-  isFocused,
   onOpenSettings,
   isDemoProject,
   demoStatus = 'idle',
@@ -167,8 +162,59 @@ function ContextSidebarImpl({
   demoError,
   onToggleDemo
 }: Props): ReactElement {
-  const borderColor = isFocused ? SEM_INDIGO : BORDER_MUTED
   const browserUrl = getBrowserUrl(workspaceId, projectId, session, apiUrl)
+  const debugUrl = getDebugSessionUrl(workspaceId, projectId, session?.debugSessionId)
+  const prUrl = session?.prUrl ?? null
+
+  // Interactive elements in visual order (top to bottom).
+  const items = useMemo(() => {
+    const list: { key: string; activate: () => void }[] = []
+    if (debugUrl) list.push({ key: 'debug', activate: () => openUrl(debugUrl) })
+    if (prUrl) list.push({ key: 'pr', activate: () => openUrl(prUrl) })
+    if (isDemoProject && demoUrl) list.push({ key: 'demo-url', activate: () => openUrl(demoUrl) })
+    if (isDemoProject && onToggleDemo) list.push({ key: 'demo-toggle', activate: onToggleDemo })
+    if (!isDemoProject && browserUrl) list.push({ key: 'browser', activate: () => openUrl(browserUrl) })
+    if (onOpenSettings) list.push({ key: 'settings', activate: onOpenSettings })
+    return list
+  }, [debugUrl, prUrl, isDemoProject, demoUrl, onToggleDemo, browserUrl, onOpenSettings])
+
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null)
+
+  const { isActive: isFocused, focus } = useFocusZone({
+    id: 'sidebar',
+    order: 3,
+    fallbackZone: 'list',
+    hints: SIDEBAR_ZONE_HINTS
+  })
+
+  // ↑↓ move between the interactive elements, Enter/Space activates; the
+  // focused link is kept visible inside the scroll area. Only the debug/PR
+  // links live inside the scrollbox — the rest render in the action-button
+  // footer below it, so scrollChildIntoView must skip them.
+  const { index, setIndex } = useListNavigation({
+    zoneId: 'sidebar',
+    items,
+    onActivate: (item) => item.activate(),
+    itemId: (item) => (item.key === 'debug' || item.key === 'pr' ? `sidebar-item-${item.key}` : undefined),
+    scrollRef
+  })
+
+  const borderColor = isFocused ? SEM_INDIGO : BORDER_MUTED
+  const focusedKey = isFocused ? (items[index]?.key ?? null) : null
+
+  const focusMouseUp = clickHandler(focus)
+
+  // Clicking an item stops propagation before the container's focus handler
+  // runs, so sync the zone + keyboard cursor to the clicked item here.
+  const activateItem = (key: string, run: () => void) => {
+    const i = items.findIndex((it) => it.key === key)
+    if (i >= 0) setIndex(i)
+    focus()
+    run()
+  }
+
+  const linkFg = (key: string) => (focusedKey === key ? ACCENT : LINK_SUBTLE)
+  const linkAttrs = (key: string) => tuiAttrs({ underline: true, bold: focusedKey === key })
 
   const demoSection = isDemoProject ? (
     <box flexDirection='column' gap={0} marginTop={1} flexShrink={0}>
@@ -200,8 +246,8 @@ function ContextSidebarImpl({
         </text>
       </box>
       {demoUrl ? (
-        <box onMouseUp={clickHandler(() => openUrl(demoUrl))}>
-          <text fg={LINK_SUBTLE} attributes={tuiAttrs({ underline: true })}>
+        <box onMouseUp={clickHandler(() => activateItem('demo-url', () => openUrl(demoUrl)))}>
+          <text fg={linkFg('demo-url')} attributes={linkAttrs('demo-url')}>
             {demoUrl.length > SIDEBAR_WIDTH - 4 ? demoUrl.slice(0, SIDEBAR_WIDTH - 7) + '...' : demoUrl}
           </text>
         </box>
@@ -220,7 +266,8 @@ function ContextSidebarImpl({
         <box marginTop={1}>
           <FocusedOutlineButton
             label={demoStatus === 'running' || demoStatus === 'starting' ? 'Stop demo' : 'Start demo'}
-            onPress={onToggleDemo}
+            focused={focusedKey === 'demo-toggle'}
+            onPress={() => activateItem('demo-toggle', onToggleDemo)}
           />
         </box>
       )}
@@ -229,10 +276,17 @@ function ContextSidebarImpl({
         <FocusedOutlineButton
           label='Open in browser'
           idleBorderColor={BRAND_MARK_PRIMARY}
-          onPress={() => openUrl(browserUrl)}
+          focused={focusedKey === 'browser'}
+          onPress={() => activateItem('browser', () => openUrl(browserUrl))}
         />
       )}
-      {onOpenSettings && <FocusedOutlineButton label='Settings' onPress={onOpenSettings} />}
+      {onOpenSettings && (
+        <FocusedOutlineButton
+          label='Settings'
+          focused={focusedKey === 'settings'}
+          onPress={() => activateItem('settings', onOpenSettings)}
+        />
+      )}
     </box>
   )
 
@@ -248,6 +302,7 @@ function ContextSidebarImpl({
         padding={1}
         paddingBottom={0}
         gap={1}
+        onMouseUp={focusMouseUp}
       >
         <scrollbox flexGrow={1} flexShrink={1} minHeight={0} scrollY focused={false} style={SIDEBAR_SCROLL_STYLE}>
           <box flexDirection='column' flexShrink={0} width='100%' gap={2}>
@@ -315,8 +370,17 @@ function ContextSidebarImpl({
       padding={1}
       paddingBottom={0}
       gap={1}
+      onMouseUp={focusMouseUp}
     >
-      <scrollbox flexGrow={1} flexShrink={1} minHeight={0} scrollY focused={false} style={SIDEBAR_SCROLL_STYLE}>
+      <scrollbox
+        ref={scrollRef}
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={0}
+        scrollY
+        focused={false}
+        style={SIDEBAR_SCROLL_STYLE}
+      >
         <box flexDirection='column' flexShrink={0} width='100%' gap={2}>
           {/* Status section */}
           <box flexDirection='column' gap={1}>
@@ -341,17 +405,13 @@ function ContextSidebarImpl({
             {session.model && <InfoRow label='Model:' value={session.model} />}
             {session.environmentName && <InfoRow label='Environment:' value={session.environmentName} />}
             {session.releaseVersion && <InfoRow label='Release:' value={session.releaseVersion} />}
-            {session.debugSessionId && (
+            {debugUrl && (
               <InfoRow
                 label='Debug Session:'
                 direction='row'
                 valueElement={
-                  <box
-                    onMouseUp={clickHandler(() =>
-                      openUrl(getDebugSessionUrl(workspaceId, projectId, session.debugSessionId))
-                    )}
-                  >
-                    <text fg={LINK_SUBTLE} attributes={tuiAttrs({ underline: true })}>
+                  <box id='sidebar-item-debug' onMouseUp={clickHandler(() => activateItem('debug', () => openUrl(debugUrl)))}>
+                    <text fg={linkFg('debug')} attributes={linkAttrs('debug')}>
                       Open
                     </text>
                   </box>
@@ -364,13 +424,11 @@ function ContextSidebarImpl({
                 <text fg={LINK_SUBTLE}>{session.branchName}</text>
               </box>
             )}
-            {session.prUrl && (
-              <box flexDirection='column' onMouseUp={clickHandler(() => openUrl(session.prUrl!))}>
+            {prUrl && (
+              <box id='sidebar-item-pr' flexDirection='column' onMouseUp={clickHandler(() => activateItem('pr', () => openUrl(prUrl)))}>
                 <text fg={FG_MUTED}>PR:</text>
-                <text fg={LINK_SUBTLE} attributes={tuiAttrs({ underline: true })}>
-                  {session.prUrl.length > SIDEBAR_WIDTH - 6
-                    ? session.prUrl.slice(0, SIDEBAR_WIDTH - 9) + '...'
-                    : session.prUrl}
+                <text fg={linkFg('pr')} attributes={linkAttrs('pr')}>
+                  {prUrl.length > SIDEBAR_WIDTH - 6 ? prUrl.slice(0, SIDEBAR_WIDTH - 9) + '...' : prUrl}
                 </text>
               </box>
             )}

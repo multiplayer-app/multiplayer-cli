@@ -30,8 +30,17 @@ const MODEL_OPTIONS = [
   { label: 'claude-sonnet-4-6', value: 'claude-sonnet-4-6' },
   { label: 'claude-opus-4-6', value: 'claude-opus-4-6' },
   { label: 'claude-haiku-4-5-20251001', value: 'claude-haiku-4-5-20251001' },
+  // Codex
+  { label: 'gpt-5.3-codex', value: 'gpt-5.3-codex' },
+  { label: 'gpt-5.1-codex-mini', value: 'gpt-5.1-codex-mini' },
+  { label: 'gpt-5.1-codex', value: 'gpt-5.1-codex' },
+  { label: 'gpt-5.1-codex-max', value: 'gpt-5.1-codex-max' },
+  // OpenAI
   { label: 'gpt-4o', value: 'gpt-4o' },
   { label: 'gpt-4o-mini', value: 'gpt-4o-mini' },
+  // Gemini (via Google's OpenAI-compatible endpoint)
+  { label: 'gemini-2.5-pro', value: 'gemini-2.5-pro' },
+  { label: 'gemini-2.5-flash', value: 'gemini-2.5-flash' },
   { label: 'Custom...', value: '__custom__' },
 ]
 

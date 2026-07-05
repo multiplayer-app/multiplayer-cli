@@ -14,6 +14,7 @@ interface Props {
   demoStatus?: DemoStatus
   demoUrl?: string | null
   demoError?: string | null
+  apiUrl?: string
 }
 
 function EmptyDetailPaneImpl({
@@ -25,6 +26,7 @@ function EmptyDetailPaneImpl({
   demoStatus,
   demoUrl,
   demoError,
+  apiUrl,
 }: Props): ReactElement {
   const showDemo = isDemoProject && !!demoDir
 
@@ -79,6 +81,7 @@ function EmptyDetailPaneImpl({
             demoStatus={demoStatus ?? 'idle'}
             demoUrl={demoUrl ?? null}
             demoError={demoError ?? null}
+            apiUrl={apiUrl}
           />
         </box>
       )}

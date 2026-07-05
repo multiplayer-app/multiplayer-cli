@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useEffect, type ReactElement } from 'react'
 import type { TextareaRenderable } from '@opentui/core'
-import { useKeyboard } from '@opentui/react'
 import type { KeyEvent } from '@opentui/core'
+import { useFocusZone } from '../lib/focus/index.js'
+import { clickHandler } from './shared/clickHandler.js'
 import { tuiAttrs } from '../lib/tuiAttrs.js'
 import type { AgentChatStatus } from '../types/index.js'
 import {
@@ -20,6 +21,11 @@ import {
 /** Chat statuses that indicate the agent is actively working. */
 const ACTIVE_STATUSES = new Set<AgentChatStatus | string>(['processing', 'streaming'])
 
+const COMPOSER_ZONE_HINTS = [
+  { id: 'send', keys: '↵', label: 'send' },
+  { id: 'esc', keys: 'Esc', label: 'back' }
+] as const
+
 export interface SlashCommand {
   command: string
   description: string
@@ -30,18 +36,12 @@ export interface ChatComposerProps {
   chatId: string | null
   /** Current status of the selected chat session. */
   chatStatus: AgentChatStatus | string | null
-  /** Whether the composer is focused (accepts keyboard input). */
-  isFocused: boolean
   /** Available width for the composer. */
   width: number
   /** Called when the user sends a message. */
   onSend: (chatId: string, content: string) => void
   /** Called when the user requests to abort the current generation. */
   onAbort: (chatId: string) => void
-  /** Called when the user requests to focus the composer. */
-  onRequestFocus: () => void
-  /** Called when the user presses Escape. */
-  onEscape: () => void
   /** Slash commands available in this composer. */
   slashCommands?: SlashCommand[]
   /** Called when the user submits a slash command. Return true if handled. */
@@ -51,12 +51,9 @@ export interface ChatComposerProps {
 export function ChatComposer({
   chatId,
   chatStatus,
-  isFocused,
   width,
   onSend,
   onAbort,
-  onRequestFocus,
-  onEscape,
   slashCommands,
   onCommand
 }: ChatComposerProps): ReactElement {
@@ -106,28 +103,23 @@ export function ChatComposer({
     setHasContent(text.trim().length > 0)
   }, [])
 
-  // Escape to blur, Enter to abort (when active)
-  useKeyboard(
-    useCallback(
-      (key: KeyEvent) => {
-        if (!isFocused) return
-
-        if (key.name === 'escape') {
-          onEscape()
-          key.stopPropagation()
-          return
-        }
-
-        // Enter to abort when agent is active
-        if (key.name === 'return' && !key.shift && canAbort) {
-          handleAbort()
-          key.stopPropagation()
-          return
-        }
-      },
-      [isFocused, canAbort, handleAbort, onEscape]
-    )
-  )
+  // 'input' kind: single-char dashboard shortcuts are suppressed while typing.
+  // Escape falls back to the detail zone; Enter aborts while generating
+  // (intercepted here so the textarea's submit binding doesn't fire).
+  const { isActive: isFocused, focus: focusComposer } = useFocusZone({
+    id: 'composer',
+    order: 2,
+    kind: 'input',
+    fallbackZone: 'detail',
+    hints: COMPOSER_ZONE_HINTS,
+    onKey: (key: KeyEvent) => {
+      if (key.name === 'return' && !key.shift && canAbort) {
+        handleAbort()
+        return true
+      }
+      return false
+    }
+  })
 
   // Wire up onSubmit via ref — the React reconciler only handles onSubmit for
   // <input>, not <textarea>, so the JSX prop is silently ignored.
@@ -244,10 +236,7 @@ export function ChatComposer({
         borderColor={borderColor}
         flexDirection='column'
         gap={0}
-        onMouseUp={(e) => {
-          e.stopPropagation()
-          onRequestFocus()
-        }}
+        onMouseUp={clickHandler(focusComposer)}
       >
         {/* Textarea row */}
         <box flexDirection='row' gap={1} padding={1}>
