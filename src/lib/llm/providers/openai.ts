@@ -152,7 +152,7 @@ function readFileSafe(projectDir: string, filePath: string): string {
       if (srcGuess !== filePath && fs.existsSync(srcResolved)) {
         const content = fs.readFileSync(srcResolved, 'utf-8')
         return `(Note: "${filePath}" not found; serving source equivalent "${srcGuess}" instead)\n\n` +
-          (content.length > MAX_FILE_SIZE ? content.slice(0, MAX_FILE_SIZE) + `\n\n[… truncated]` : content)
+          (content.length > MAX_FILE_SIZE ? content.slice(0, MAX_FILE_SIZE) + '\n\n[… truncated]' : content)
       }
       // Fuzzy search: find files with the same basename anywhere in the project
       const fileName = path.basename(filePath)
