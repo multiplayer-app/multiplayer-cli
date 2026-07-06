@@ -36,7 +36,13 @@ importers:
       '@opentui/core-linux-arm64':
         specifier: 0.4.2
         version: 0.4.2
+      '@opentui/core-linux-arm64-musl':
+        specifier: 0.4.2
+        version: 0.4.2
       '@opentui/core-linux-x64':
+        specifier: 0.4.2
+        version: 0.4.2
+      '@opentui/core-linux-x64-musl':
         specifier: 0.4.2
         version: 0.4.2
       '@opentui/core-win32-arm64':
@@ -398,7 +404,6 @@ packages:
     resolution: {integrity: sha512-heNciL2ngPU+kq1h01PHLsxn6Fr8iqTFtbxSdVbhaY3XihuIjkuXyEhFeuoa1lsXY7Bb2gpWnX5EQVWnZsAuDQ==}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@opentui/core-linux-arm64@0.4.2':
     resolution: {integrity: sha512-RjOx2HcjLRtGSy9WrAGSdr5M9SpJuPifPORpImx6Mciovw0ltnE0uoYjIyor82uf6/LExWC7YA2AcAl+YBxayA==}
@@ -409,7 +414,6 @@ packages:
     resolution: {integrity: sha512-Cjv6Bv7l3p/KLNJr5RyqCS0FmRlAGJnkA2IK3S+HkHhCOv/O02S1G+DBUY6POnyjp1eNy95vauustApobhdbig==}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@opentui/core-linux-x64@0.4.2':
     resolution: {integrity: sha512-9s0s/ooK+AhWP306By3gu+XhzcVEThC2sqKMPK1nQmGDujQhd+xOrtbtfCVcJSx62UzAovC2VNqypvP8vHByOg==}
@@ -1853,13 +1857,11 @@ snapshots:
 
   '@opentui/core-darwin-x64@0.4.2': {}
 
-  '@opentui/core-linux-arm64-musl@0.4.2':
-    optional: true
+  '@opentui/core-linux-arm64-musl@0.4.2': {}
 
   '@opentui/core-linux-arm64@0.4.2': {}
 
-  '@opentui/core-linux-x64-musl@0.4.2':
-    optional: true
+  '@opentui/core-linux-x64-musl@0.4.2': {}
 
   '@opentui/core-linux-x64@0.4.2': {}
 
