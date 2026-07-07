@@ -24,6 +24,18 @@ const DEMO_PROJECT_NAME = 'multiplayer-demo'
 const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-6'
 const DEFAULT_OPENAI_MODEL = 'gpt-4o'
 
+const SCROLLBAR_STYLE = {
+  wrapperOptions: { flexGrow: 1 },
+  viewportOptions: { flexGrow: 1 },
+  scrollbarOptions: {
+    showArrows: false,
+    trackOptions: {
+      foregroundColor: '#484f58',
+      backgroundColor: '#21262d'
+    }
+  }
+} as const
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type PhaseStatus = 'pending' | 'running' | 'waiting' | 'done' | 'error'
@@ -559,7 +571,18 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
-    <box flexDirection='column' gap={1}>
+    <box flexDirection='column' flexGrow={1} flexShrink={1} minHeight={0}>
+      <scrollbox
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={0}
+        scrollY
+        stickyScroll
+        stickyStart='bottom'
+        focused={false}
+        style={SCROLLBAR_STYLE}
+      >
+        <box flexDirection='column' flexShrink={0} width='100%' gap={1}>
       {/* Clone */}
       <PhaseRow label='Repository' phase={clonePhase} />
       {clonePhase.error && (
@@ -636,9 +659,11 @@ export function DemoProgressScreen({ initialConfig, profileName, onComplete, onB
           <text attributes={tuiAttrs({ dim: true })}>Model will default to {DEFAULT_OPENAI_MODEL}.</text>
         </box>
       )}
+        </box>
+      </scrollbox>
 
       {/* Footer */}
-      <box marginTop={1}>
+      <box marginTop={1} flexShrink={0}>
         {isPicking ? (
           <FooterHints hints='↑↓ navigate · Enter select · Click to select · Esc back' />
         ) : isWaitingBrowser ? (

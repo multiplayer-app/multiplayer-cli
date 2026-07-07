@@ -101,7 +101,9 @@ export function DashboardScreen({
       ? Math.max(20, columns - 71) // list(32) + sidebar(30) + border(2) + pad(2) + scrollbar(1) + innerPad(2) + gap(2)
       : Math.max(20, columns - 41)
   const listFluidTextWidth = Math.max(16, columns - 10)
-  const logBlockHeight = Math.min(28, Math.max(8, rows - 10))
+  // Scale with terminal height: ~35% of rows, capped so it stays reasonable on
+  // tall terminals and shrinks on short ones (avoids the dock eating the top UI).
+  const logBlockHeight = Math.min(20, Math.max(6, Math.floor(rows * 0.35)))
 
   // ── Focus & selection state ─────────────────────────────────────────────────
 

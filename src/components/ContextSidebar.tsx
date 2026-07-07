@@ -217,7 +217,7 @@ function ContextSidebarImpl({
   const linkAttrs = (key: string) => tuiAttrs({ underline: true, bold: focusedKey === key })
 
   const demoSection = isDemoProject ? (
-    <box flexDirection='column' gap={0} marginTop={1} flexShrink={0}>
+    <box flexDirection='column' gap={0} marginTop={0} flexShrink={0}>
       <SectionTitle title='Demo App' />
       <box flexDirection='row' gap={1}>
         <text
