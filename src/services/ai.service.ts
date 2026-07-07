@@ -163,9 +163,21 @@ export const verifyClaudeModel = async (model?: string): Promise<void> => {
   claudeAuthLog(`[claude-auth] model ${model} verified`)
 }
 
+// Canonical Anthropic model ids (newest first), used wherever the live Models
+// API can't be queried. Keep in sync with Anthropic model launches.
+export const FALLBACK_ANTHROPIC_MODELS = [
+  'claude-fable-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-sonnet-5',
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5',
+]
+
 // Requires an Anthropic API key (modelKey or ANTHROPIC_API_KEY). Claude Code
 // OAuth/subscription users have neither, so the SDK can't authenticate and this
-// returns [] — callers fall back to a static model list. Empty is expected, not a bug.
+// returns [] — callers fall back to FALLBACK_ANTHROPIC_MODELS. Empty is expected, not a bug.
 export const fetchAnthropicModels = async (modelKey?: string): Promise<string[]> => {
   try {
     const client = new Anthropic(modelKey ? { apiKey: modelKey } : {})

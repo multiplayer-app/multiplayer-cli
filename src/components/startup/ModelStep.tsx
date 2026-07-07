@@ -53,7 +53,7 @@ const PROVIDERS: ProviderDef[] = [
     icon: '◆',
     iconColor: '#22d3ee',
     keyPlaceholder: '',
-    fallbackModels: ['claude-code', 'claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
+    fallbackModels: ['claude-code', ...AiService.FALLBACK_ANTHROPIC_MODELS],
   },
   {
     id: 'openai',

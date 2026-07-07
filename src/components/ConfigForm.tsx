@@ -6,6 +6,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { AgentConfig } from '../types/index.js'
 import { validateApiKey } from '../services/radar.service.js'
+import { FALLBACK_ANTHROPIC_MODELS } from '../services/ai.service.js'
 
 interface Field {
   key: keyof AgentConfig
@@ -26,10 +27,7 @@ const isClaudeModel = (model?: string): boolean => !!(model?.startsWith('claude'
 
 const MODEL_OPTIONS = [
   { label: 'claude-code', value: 'claude-code' },
-  { label: 'claude-opus-4-7', value: 'claude-opus-4-7' },
-  { label: 'claude-sonnet-4-6', value: 'claude-sonnet-4-6' },
-  { label: 'claude-opus-4-6', value: 'claude-opus-4-6' },
-  { label: 'claude-haiku-4-5-20251001', value: 'claude-haiku-4-5-20251001' },
+  ...FALLBACK_ANTHROPIC_MODELS.map((id) => ({ label: id, value: id })),
   // Codex
   { label: 'gpt-5.3-codex', value: 'gpt-5.3-codex' },
   { label: 'gpt-5.1-codex-mini', value: 'gpt-5.1-codex-mini' },
