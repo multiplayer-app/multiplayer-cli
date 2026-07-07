@@ -2,6 +2,7 @@ import { io, Socket } from 'socket.io-client'
 import jwt from 'jsonwebtoken'
 import { URL } from 'url'
 import { createApiService } from './api.service.js'
+import { fetchAnthropicModels, FALLBACK_ANTHROPIC_MODELS } from './ai.service.js'
 import { getAuthHeaders, isOAuthToken } from '../lib/authHeaders.js'
 import { AuthError, AUTH_STATUS_CODES } from '../lib/authError.js'
 import {
@@ -113,7 +114,18 @@ export interface RadarService {
   listEnvironments: (workspaceId: string, projectId: string) => Promise<RadarDetectedEnvironment[]>
 }
 
-const computeAvailableModels = (config: AgentConfig): string[] => {
+// Cached per process: models don't change mid-run and buildAuthData is rebuilt
+// on every socket reconnect, so we must not refetch each time.
+let anthropicModelsPromise: Promise<string[]> | null = null
+
+const getAnthropicModels = (modelKey?: string): Promise<string[]> => {
+  anthropicModelsPromise ??= fetchAnthropicModels(modelKey).then(
+    (ids) => (ids.length > 0 ? ids : FALLBACK_ANTHROPIC_MODELS),
+  )
+  return anthropicModelsPromise
+}
+
+const computeAvailableModels = async (config: AgentConfig): Promise<string[]> => {
   const models: string[] = []
 
   // claude-code SDK is always available (bundled)
@@ -123,7 +135,7 @@ const computeAvailableModels = (config: AgentConfig): string[] => {
   // or when model is already an Anthropic model
   if (!config.modelUrl || config.model?.startsWith('claude')) {
     if (config.modelKey || config.model?.startsWith('claude')) {
-      models.push('claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5')
+      models.push(...(await getAnthropicModels(config.modelKey)))
     }
   }
 
@@ -213,7 +225,7 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
       'x-max-concurrent-issues': String(config.maxConcurrentIssues ?? 2),
       ...(config.noGitBranch ? { 'x-no-git-branch': 'true' } : {}),
       ...(config.model ? { 'x-model': config.model } : {}),
-      'x-available-models': JSON.stringify(computeAvailableModels(config)),
+      'x-available-models': JSON.stringify(await computeAvailableModels(config)),
     }
   }
 
@@ -356,7 +368,7 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
     const size = Buffer.byteLength(markdown, 'utf8')
 
     const { url, key, bucket } = await fetchJson<{ url: string; key: string; bucket: string }>(
-      projectUrl(workspaceId, projectId, '/files/presigned-url'),
+      projectUrl(workspaceId, projectId, '/agents/files/upload/presigned'),
       { method: 'POST', body: JSON.stringify({ filename, mimeType: 'text/markdown', size, chatId }) },
     )
 

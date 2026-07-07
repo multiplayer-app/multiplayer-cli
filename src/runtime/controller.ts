@@ -1776,25 +1776,36 @@ export class RuntimeController extends EventEmitter {
 
       const markdown = AiService.buildIssueContextDoc(issue, enriched.release, debugResult?.context)
 
-      const attachment = await radar?.uploadContextDoc(issue.workspace, issue.project, chatId, markdown)
-      if (attachment) {
-        radar?.emitAgentMessage({
-          chat: chatId,
-          role: 'assistant',
-          content: '',
-          agentName: cfg.name,
-          attachments: [attachment],
-        })
+      // Upload the context doc — non-fatal; scoring below must not depend on it
+      try {
+        const attachment = await radar?.uploadContextDoc(issue.workspace, issue.project, chatId, markdown)
+        if (attachment) {
+          radar?.emitAgentMessage({
+            chat: chatId,
+            role: 'assistant',
+            content: '',
+            agentName: cfg.name,
+            attachments: [attachment],
+          })
+        }
+      } catch (err) {
+        this.log('error', `Failed to upload context doc for issue ${issue.componentHash}: ${getErrorMessage(err)}`)
       }
 
+      // analyseIssueContext falls back to a default score internally, so the
+      // threshold gate below always has a value to work with.
       const analysis = await AiService.analyseIssueContext(markdown, cfg.model, cfg.modelKey, cfg.modelUrl)
 
-      const issueUpdate: Record<string, unknown> = { fixabilityScore: analysis.fixabilityScore }
-      const severityMap: Record<string, number> = { high: 50, medium: 40, low: 20 }
-      if (!issue.severity) {
-        issueUpdate.severity = severityMap[analysis.severity] ?? 40
+      try {
+        const issueUpdate: Record<string, unknown> = { fixabilityScore: analysis.fixabilityScore }
+        const severityMap: Record<string, number> = { high: 50, medium: 40, low: 20 }
+        if (!issue.severity) {
+          issueUpdate.severity = severityMap[analysis.severity] ?? 40
+        }
+        await radar?.bulkUpdateIssue(issue.workspace, issue.project, issue.componentHash, issueUpdate)
+      } catch (err) {
+        this.log('error', `Failed to save fixability score/severity for issue ${issue.componentHash}: ${getErrorMessage(err)}`)
       }
-      await radar?.bulkUpdateIssue(issue.workspace, issue.project, issue.componentHash, issueUpdate)
 
       const threshold = agentSettings?.fixabilityScoreThreshold
       if (threshold !== undefined && analysis.fixabilityScore < threshold) {
@@ -1817,8 +1828,9 @@ export class RuntimeController extends EventEmitter {
         debugContext: debugResult?.context,
         contextMarkdown: markdown,
       }
-    } catch {
-      // Context doc upload/analysis failure is non-fatal — proceed without it
+    } catch (err) {
+      // Context doc build failure is non-fatal — proceed without it, but leave a trace
+      this.log('error', `Issue context/scoring failed for ${issue.componentHash}: ${getErrorMessage(err)}`)
       return { proceed: true }
     }
   }
