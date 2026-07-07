@@ -7,13 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@google/genai':
-        specifier: ^2.7.0
-        version: 2.7.0(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))
-      google-auth-library:
-        specifier: ^10.6.2
-        version: 10.6.2
     devDependencies:
       '@anthropic-ai/claude-agent-sdk':
         specifier: 0.2.89
@@ -21,6 +14,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.78.0
         version: 0.78.0(zod@4.4.3)
+      '@google/genai':
+        specifier: ^2.7.0
+        version: 2.7.0(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -87,6 +83,9 @@ importers:
       eslint:
         specifier: 10.1.0
         version: 10.1.0
+      google-auth-library:
+        specifier: ^10.6.2
+        version: 10.6.2
       jsonwebtoken:
         specifier: 9.0.3
         version: 9.0.3
