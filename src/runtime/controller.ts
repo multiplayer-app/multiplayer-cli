@@ -79,8 +79,17 @@ const CHAT_STATUS_TO_SESSION: Partial<Record<string, SessionStatus>> = {
   processing: 'analyzing',
   streaming: 'analyzing',
   waitingForUserAction: 'pending',
-  error: 'pending',
+  error: 'failed',
+  timedout: 'failed',
 }
+
+/**
+ * Session statuses that occupy a concurrency slot. Deliberately excludes
+ * `pending` — restored chats, manual Q&A chats resting in
+ * waitingForUserAction, and threshold-rejected issues must not starve the
+ * agent of capacity.
+ */
+const SLOT_OCCUPYING_STATUSES = new Set<SessionStatus>(['analyzing', 'pushing'])
 
 const toSessionStatus = (chatStatus: string | undefined): SessionStatus =>
   CHAT_STATUS_TO_SESSION[chatStatus ?? ''] ?? 'pending'
@@ -157,6 +166,10 @@ export class RuntimeController extends EventEmitter {
   // agent would answer the same user message twice.
   private _handledUserMessageIds = new Set<string>()
   private static readonly MAX_HANDLED_USER_MESSAGE_IDS = 500
+  // Chats accepted for processing but not yet registered as sessions. Counted
+  // by the concurrency gate so dispatches racing the async setup in
+  // processIssue can't oversubscribe the agent.
+  private _issueReservations = new Set<string>()
   private readonly _getToken: (() => Promise<string>) | undefined
 
   constructor(config: AgentConfig, logger?: Logger, getToken?: () => Promise<string>) {
@@ -322,7 +335,13 @@ export class RuntimeController extends EventEmitter {
       this._hasConnected = true
       this._consecutiveAuthErrors = 0
       this.setState(setConnection(this._state, 'connected'))
-      setTimeout(() => radar.emitIssueCheck(), 1500)
+      setTimeout(() => {
+        // Reconnect after a blip/deploy: the backend may have declared our
+        // in-flight chats dead — re-adopt them before asking for new work.
+        void this.reconcileActiveChatsAfterReconnect().finally(() => {
+          this.requestIssuesForFreeSlots()
+        })
+      }, 1500)
     })
 
     radar.onDisconnect((reason) => {
@@ -432,7 +451,17 @@ export class RuntimeController extends EventEmitter {
       this.handleAction(params)
     })
 
-    radar.onResolveIssue((payload) => {
+    radar.onResolveIssue((payload, ack) => {
+      const rejection = this.evaluateIssueAssignment(payload)
+      if (rejection) {
+        this.log('info', `Rejecting issue assignment (${rejection}): ${payload.issue?.title ?? payload.chatId}`)
+        ack?.({ accepted: false, reason: rejection })
+        return
+      }
+      // Reserve the slot before any async work so a second dispatch arriving
+      // in the same tick can't pass the capacity check too.
+      if (payload.chatId) this._issueReservations.add(payload.chatId)
+      ack?.({ accepted: true })
       void this.processIssueFromResolvePayload(payload)
     })
 
@@ -500,9 +529,8 @@ export class RuntimeController extends EventEmitter {
       this.emit('quit')
       return
     }
-    // Quit after current: check if any sessions are active
-    const active = this._state.sessions.filter((s) => !['done', 'failed', 'aborted'].includes(s.status))
-    if (active.length === 0) {
+    // Quit after current: check if any sessions are genuinely processing
+    if (this.occupiedIssueSlots() === 0) {
       this.disconnect()
       this.emit('quit')
     }
@@ -585,6 +613,30 @@ export class RuntimeController extends EventEmitter {
     } catch (err: unknown) {
       this.maybeReportAuthFailure(err)
       return null
+    }
+  }
+
+  /**
+   * After a (re)connect, checks every chat this process is still actively
+   * working on against the backend. A disconnect longer than the grace period
+   * (or a sweep on the old deployment) may have marked them error/timedout —
+   * re-adopt them by flipping the status back to processing so the results we
+   * are about to push land on a live chat.
+   */
+  private async reconcileActiveChatsAfterReconnect(): Promise<void> {
+    for (const [chatId, ctx] of this.chatContexts) {
+      if (!ctx.isProcessing) continue
+      const backendStatus = await this.fetchChatStatus(chatId)
+      if (backendStatus === 'error' || backendStatus === 'timedout') {
+        this.log('info', `Re-adopting chat ${chatId} (backend marked it ${backendStatus} while we were disconnected)`)
+        this.radar?.emitAgentChatUpdate({
+          _id: chatId,
+          contextKey: ctx.issue?.componentHash,
+          status: 'processing',
+          agentName: this._config.name,
+          dir: this._config.dir,
+        })
+      }
     }
   }
 
@@ -1385,27 +1437,95 @@ export class RuntimeController extends EventEmitter {
 
   // ─── Issue processing ─────────────────────────────────────────────────────────
 
+  /**
+   * Number of concurrency slots currently occupied: genuinely-processing
+   * sessions plus reservations for accepted-but-not-yet-registered dispatches.
+   * Statuses like `pending` (restored chats, waitingForUserAction, manual
+   * chats between turns) deliberately don't count.
+   */
+  private occupiedIssueSlots(excludeChatId?: string): number {
+    const chatIds = new Set<string>()
+    for (const s of this._state.sessions) {
+      if (SLOT_OCCUPYING_STATUSES.has(s.status)) chatIds.add(s.chatId)
+    }
+    for (const id of this._issueReservations) chatIds.add(id)
+    if (excludeChatId) chatIds.delete(excludeChatId)
+    return chatIds.size
+  }
+
+  /**
+   * Asks the backend for one issue per free concurrency slot. Each
+   * `debugging-agent:ready` yields at most one assignment, so emitting once
+   * per free slot lets a backlog fill the agent to capacity instead of
+   * draining one issue at a time.
+   */
+  private requestIssuesForFreeSlots(): void {
+    if (!this.radar || this.quitMode) return
+    const free = this._config.maxConcurrentIssues - this.occupiedIssueSlots()
+    for (let i = 0; i < free; i++) {
+      this.radar.emitIssueCheck()
+    }
+  }
+
+  /**
+   * Synchronous accept/reject decision for an incoming issue assignment.
+   * Returns a rejection reason, or null to accept. Runs before any async
+   * work so the ack (and the backend's rollback on reject) is immediate.
+   */
+  private evaluateIssueAssignment(payload: ResolveIssuePayload): string | null {
+    if (this.quitMode) return 'agent is shutting down'
+    if (!payload.chatId) return 'missing chatId'
+
+    if (this._issueReservations.has(payload.chatId) || this.chatContexts.get(payload.chatId)?.isProcessing) {
+      return 'chat is already being processed'
+    }
+
+    const componentHash = payload.issue?.componentHash
+    if (componentHash) {
+      for (const ctx of this.chatContexts.values()) {
+        if (ctx.isProcessing && ctx.issue?.componentHash === componentHash) {
+          // e.g. the backend re-dispatched an issue we're still finishing
+          // after a reconnect or a sweep reset it.
+          return 'issue is already being fixed by this agent'
+        }
+      }
+    }
+
+    if (this.occupiedIssueSlots() >= this._config.maxConcurrentIssues) {
+      return 'max concurrent issues reached'
+    }
+
+    return null
+  }
+
   private async processIssueFromResolvePayload(payload: ResolveIssuePayload): Promise<void> {
     const chatId = payload.chatId
     if (!chatId) {
       this.log('error', 'debugging-agent:resolve-issue: missing chatId')
       return
     }
-    await this.processIssue(
-      {
-        chatId,
-        chat: {
-          _id: chatId,
-          title: payload.issue.title,
-          status: 'processing',
-          metadata: {
-            issue: { componentHash: payload.issue.componentHash },
+    try {
+      await this.processIssue(
+        {
+          chatId,
+          chat: {
+            _id: chatId,
+            title: payload.issue.title,
+            status: 'processing',
+            metadata: {
+              issue: { componentHash: payload.issue.componentHash },
+            },
           },
         },
-      },
-      { issue: payload.issue, release: payload.release },
-      payload.agentSettings,
-    )
+        { issue: payload.issue, release: payload.release },
+        payload.agentSettings,
+      )
+    } finally {
+      this._issueReservations.delete(chatId)
+      // Refill: one `ready` per free slot, now that this dispatch has either
+      // finished or handed its slot back.
+      this.requestIssuesForFreeSlots()
+    }
   }
 
   private async processIssue(
@@ -1418,8 +1538,9 @@ export class RuntimeController extends EventEmitter {
     const existing = this.chatContexts.get(chatId)
     if (existing?.isProcessing) return
 
-    const activeCount = this._state.sessions.filter((s) => !['done', 'failed', 'aborted'].includes(s.status)).length
-    if (activeCount >= this._config.maxConcurrentIssues) {
+    // Backstop only — the accept/reject decision (with backend rollback on
+    // reject) happens in evaluateIssueAssignment before this method runs.
+    if (this.occupiedIssueSlots(chatId) >= this._config.maxConcurrentIssues) {
       this.log('info', `Max concurrent issues reached, skipping: ${chat.title ?? chatId}`)
       return
     }
@@ -1492,7 +1613,7 @@ export class RuntimeController extends EventEmitter {
         agentName: cfg.name,
         dir: cfg.dir,
       })
-      this.radar?.emitIssueCheck()
+      // Slot refill happens in processIssueFromResolvePayload's finally.
       return
     }
 
@@ -1648,9 +1769,10 @@ export class RuntimeController extends EventEmitter {
       context.isProcessing = false
       context.abortController = null
 
-      this.radar?.emitIssueCheck()
+      // Slot refill (ready-per-free-slot) happens in
+      // processIssueFromResolvePayload's finally, after the reservation is dropped.
 
-      const stillActive = this._state.sessions.filter((s) => !['done', 'failed', 'aborted'].includes(s.status)).length
+      const stillActive = this.occupiedIssueSlots(chatId)
       this.setState(setRateLimitActive(this._state, stillActive))
 
       if (context.worktreeDir) {
@@ -1666,8 +1788,9 @@ export class RuntimeController extends EventEmitter {
       }
 
       if ((this.quitMode as QuitMode | null) === 'after-current') {
-        const remaining = this._state.sessions.filter((s) => !['done', 'failed', 'aborted'].includes(s.status)).length
-        if (remaining === 0) {
+        // Only genuinely-processing work blocks the quit — idle `pending`
+        // sessions (restored chats, waitingForUserAction) never "finish".
+        if (this.occupiedIssueSlots(chatId) === 0) {
           this.disconnect()
           this.emit('quit')
         }
