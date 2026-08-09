@@ -1,6 +1,5 @@
 import { io, Socket } from 'socket.io-client'
 import jwt from 'jsonwebtoken'
-import { URL } from 'url'
 import { createApiService } from './api.service.js'
 import { fetchAnthropicModels, FALLBACK_ANTHROPIC_MODELS } from './ai.service.js'
 import { getAuthHeaders, isOAuthToken } from '../lib/authHeaders.js'
@@ -33,7 +32,16 @@ import {
   EVENT_AGENT_CHAT_BULK_DELETE,
   EVENT_AGENT_CHAT_DELETE,
   EVENT_DEBUGGING_AGENT_UPDATE,
+  toApiOrigin,
+  toApiBase,
 } from '../config.js'
+
+/**
+ * Acknowledgment callback for a resolve-issue dispatch. Calling it with
+ * `accepted: false` makes the backend roll the assignment back (release the
+ * capacity slot, fail the chat, leave the issue available for other agents).
+ */
+export type ResolveIssueAck = (response: { accepted: boolean; reason?: string }) => void
 
 export interface RadarService {
   socket: Socket
@@ -80,7 +88,7 @@ export interface RadarService {
   onAction: (
     handler: (params: { chatId: string; toolCallId: string; action: string; data?: Record<string, unknown> }) => void
   ) => void
-  onResolveIssue: (handler: (payload: ResolveIssuePayload) => void) => void
+  onResolveIssue: (handler: (payload: ResolveIssuePayload, ack?: ResolveIssueAck) => void) => void
   onSessionStart: (handler: (payload: ChatSessionPayload) => void) => void
   onChatUpdate: (handler: (chat: AgentChat) => void) => void
   onChatBulkDelete: (handler: (payload: { _id: string[]; workspace: string; project: string }) => void) => void
@@ -155,9 +163,8 @@ const computeAvailableModels = async (config: AgentConfig): Promise<string[]> =>
 }
 
 export const createRadarService = (config: AgentConfig, logger: Logger, getToken?: () => Promise<string>): RadarService => {
-  // URL.origin never has a trailing slash, so we use it directly as the API base
-  const host = new URL(config.url).origin
-  const apiBase = `${host}/v0/radar`
+  const host = toApiOrigin(config.url)
+  const apiBase = `${toApiBase(config.url)}/radar`
 
   /** Build a fully-qualified project-scoped API URL. */
   const projectUrl = (workspaceId: string, projectId: string, path: string) =>
@@ -230,7 +237,9 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
   }
 
   const socket: Socket = io(`${host}/workspaces/${config.workspace}/projects/${config.project}/agents`, {
-    path: '/v0/radar/ws',
+    // Socket.IO's `path` option is the URL path portion only (no origin), so derive
+    // it from apiBase rather than duplicating the "/radar" route segment here.
+    path: `${new URL(apiBase).pathname}/ws`,
     // Use a function (not a static object) so auth data is built fresh for every
     // connection attempt, including reconnects.  This allows the token to be
     // refreshed before it is sent, preventing "Authorization failed" errors when
@@ -346,8 +355,12 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
     socket.on(EVENT_AGENT_CHAT_DELETE, handler)
   }
 
-  const onResolveIssue = (handler: (payload: ResolveIssuePayload) => void) => {
-    socket.on(EVENT_DEBUGGING_AGENT_RESOLVE_ISSUE, (payload: ResolveIssuePayload) => handler(payload))
+  const onResolveIssue = (handler: (payload: ResolveIssuePayload, ack?: ResolveIssueAck) => void) => {
+    socket.on(
+      EVENT_DEBUGGING_AGENT_RESOLVE_ISSUE,
+      (payload: ResolveIssuePayload, ack?: ResolveIssueAck) =>
+        handler(payload, typeof ack === 'function' ? ack : undefined),
+    )
   }
 
   const onSessionStart = (handler: (payload: ChatSessionPayload) => void) => {
