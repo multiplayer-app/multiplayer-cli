@@ -11,6 +11,7 @@ import { Issue, Release, ConversationMessage, AgentSessionMode } from '../types/
 import { logger } from '../logger.js'
 import { logToTui } from '../lib/tuiSink.js'
 import { getAuthHeaders } from '../lib/authHeaders.js'
+import { toApiBase } from '../config.js'
 import {
   escapePromptMarkup,
   sanitizeCapturedValue,
@@ -466,8 +467,7 @@ export const fetchIssueDebugContext = async (
 ): Promise<{ context: string; debugSessionId: string } | undefined> => {
   try {
     const listUrl = new URL(
-      `/v0/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions`,
-      mcpConfig.apiUrl,
+      `${toApiBase(mcpConfig.apiUrl)}/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions`,
     )
     listUrl.searchParams.set('issueComponentHash', issue.componentHash)
     listUrl.searchParams.set('limit', '1')
@@ -501,14 +501,12 @@ export const fetchIssueDebugContext = async (
       logs = Array.isArray(logsData) ? logsData : (logsData?.data ?? [])
     } else {
       const tracesUrl = new URL(
-        `/v0/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions/${debugSession._id}/otel-traces`,
-        mcpConfig.apiUrl,
+        `${toApiBase(mcpConfig.apiUrl)}/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions/${debugSession._id}/otel-traces`,
       )
       tracesUrl.searchParams.set('skip', '0')
       tracesUrl.searchParams.set('limit', '300')
       const logsUrl = new URL(
-        `/v0/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions/${debugSession._id}/otel-logs`,
-        mcpConfig.apiUrl,
+        `${toApiBase(mcpConfig.apiUrl)}/radar/workspaces/${issue.workspace}/projects/${issue.project}/debug-sessions/${debugSession._id}/otel-logs`,
       )
       logsUrl.searchParams.set('skip', '0')
       logsUrl.searchParams.set('limit', '300')
@@ -549,8 +547,7 @@ export const fetchDebugSessionContext = async (
   try {
     // Fetch the session to find S3 file URLs if available
     const sessionUrl = new URL(
-      `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}`,
-      mcpConfig.apiUrl,
+      `${toApiBase(mcpConfig.apiUrl)}/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}`,
     )
     const sessionRes = await fetch(sessionUrl.toString(), {
       headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType),
@@ -572,14 +569,12 @@ export const fetchDebugSessionContext = async (
       logs = Array.isArray(logsData) ? logsData : (logsData?.data ?? [])
     } else {
       const tracesUrl = new URL(
-        `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-traces`,
-        mcpConfig.apiUrl,
+        `${toApiBase(mcpConfig.apiUrl)}/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-traces`,
       )
       tracesUrl.searchParams.set('skip', '0')
       tracesUrl.searchParams.set('limit', '300')
       const logsUrl = new URL(
-        `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-logs`,
-        mcpConfig.apiUrl,
+        `${toApiBase(mcpConfig.apiUrl)}/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/otel-logs`,
       )
       logsUrl.searchParams.set('skip', '0')
       logsUrl.searchParams.set('limit', '300')
@@ -593,13 +588,11 @@ export const fetchDebugSessionContext = async (
 
     // Fetch rrweb events and session notes in parallel
     const rrwebUrl = new URL(
-      `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/rrweb-events`,
-      mcpConfig.apiUrl,
+      `${toApiBase(mcpConfig.apiUrl)}/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/rrweb-events`,
     )
     rrwebUrl.searchParams.set('limit', '5000')
     const notesUrl = new URL(
-      `/v0/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/session-notes/context`,
-      mcpConfig.apiUrl,
+      `${toApiBase(mcpConfig.apiUrl)}/radar/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/session-notes/context`,
     )
     const [rrwebRes, notesRes] = await Promise.all([
       fetch(rrwebUrl.toString(), { headers: getAuthHeaders(mcpConfig.apiKey, mcpConfig.authType) }),
@@ -637,8 +630,7 @@ export const fetchDebugSessionSnapshot = async (
 ): Promise<string | undefined> => {
   try {
     const url = new URL(
-      `/v0/assets/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/notes/snapshot`,
-      mcpConfig.apiUrl,
+      `${toApiBase(mcpConfig.apiUrl)}/api/assets/workspaces/${workspaceId}/projects/${projectId}/debug-sessions/${debugSessionId}/notes/snapshot`,
     )
     url.searchParams.set('timestamp', String(Math.floor(timestampMs)))
 
@@ -1071,7 +1063,7 @@ export const buildDebugSessionMcpServer = (
   workspaceId: string,
   projectId: string,
 ): McpServerConfig => {
-  const base = `${mcpConfig.apiUrl}/v0/radar/workspaces/${workspaceId}/projects/${projectId}`
+  const base = `${toApiBase(mcpConfig.apiUrl)}/radar/workspaces/${workspaceId}/projects/${projectId}`
   const debugSessionId = z.string().describe('The debug session ID')
 
   const tracesTool = tool(

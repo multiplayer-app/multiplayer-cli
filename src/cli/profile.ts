@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { MP_DIR, PRODUCTION_HOSTNAME } from '../config.js'
+import { MP_DIR, PRODUCTION_API_HOSTNAME } from '../config.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -90,7 +90,7 @@ export function initEnvironment(explicitUrl?: string): void {
   }
   try {
     const { hostname } = new URL(explicitUrl)
-    _fileSuffix = hostname && hostname !== PRODUCTION_HOSTNAME ? `.${hostname}` : ''
+    _fileSuffix = hostname && hostname !== PRODUCTION_API_HOSTNAME ? `.${hostname}` : ''
   } catch {
     _fileSuffix = ''
   }

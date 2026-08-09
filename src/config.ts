@@ -8,17 +8,50 @@ export const LEGACY_TOKENS_FILE = path.join(MP_DIR, 'tokens.json')
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 
-export const PRODUCTION_HOSTNAME = 'api.multiplayer.app'
+export const PRODUCTION_API_HOSTNAME = 'api.multiplayer.app'
 export const PRODUCTION_WEB_HOSTNAME = 'go.multiplayer.app'
-export const API_URL = process.env.MULTIPLAYER_URL || `https://${PRODUCTION_HOSTNAME}/v0`
-export const BASE_API_URL = process.env.MULTIPLAYER_BASE_URL || `https://${PRODUCTION_HOSTNAME}`
+
+/**
+ * The single source of truth for which Multiplayer server the CLI talks to,
+ * and at which version/prefix its routes are mounted. Configurable via --url /
+ * MULTIPLAYER_URL. The backend's own route prefix is independently overridable
+ * there (multiplayer-api-service/radar-service both read API_PREFIX from env,
+ * defaulting to /v0/api and /v0/radar respectively) — so this is NOT assumed to
+ * always be `/v0`; toApiBase() below preserves whatever path the caller
+ * configured rather than forcing one, so a self-hosted deploy with a different
+ * prefix (or none) is respected everywhere instead of being silently overwritten.
+ */
+export const API_URL = process.env.MULTIPLAYER_URL || `https://${PRODUCTION_API_HOSTNAME}/v0`
+
+/**
+ * Origin (scheme + host) of a Multiplayer API URL, discarding any path. Use
+ * this for root-mounted endpoints that live outside the versioned API, like
+ * `/.well-known/...`, and for the socket.io connection origin (whose own
+ * versioned path is passed separately via socket.io's `path` option).
+ */
+export function toApiOrigin(url: string): string {
+  return new URL(url).origin
+}
+
+/**
+ * Normalizes a configured Multiplayer API URL for safe path concatenation by
+ * trimming any trailing slash. Every backend route (the api-service's
+ * `/api/...` domain and the standalone radar-service's `/radar/...` domain) is
+ * relative to this base — e.g. `${toApiBase(url)}/api/auth/user-session`,
+ * `${toApiBase(url)}/radar/...`. Deliberately does NOT rebuild the path from
+ * the origin — the configured URL (default: https://.../v0) already carries
+ * whatever version/prefix segment the target backend expects.
+ */
+export function toApiBase(url: string): string {
+  return url.replace(/\/+$/, '')
+}
 
 /** Derives the web app base URL from the API URL (e.g. --url flag). */
 export function getWebBaseUrl(apiUrl?: string): string {
   if (!apiUrl) return `https://${PRODUCTION_WEB_HOSTNAME}`
   try {
     const { hostname } = new URL(apiUrl)
-    if (hostname === PRODUCTION_HOSTNAME) return `https://${PRODUCTION_WEB_HOSTNAME}`
+    if (hostname === PRODUCTION_API_HOSTNAME) return `https://${PRODUCTION_WEB_HOSTNAME}`
     return new URL(apiUrl).origin
   } catch {
     return `https://${PRODUCTION_WEB_HOSTNAME}`

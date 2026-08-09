@@ -2,7 +2,7 @@ import { OAuthManager } from '../auth/oauth-manager.js'
 import { deleteProfileTokenData } from '../auth/token-store.js'
 import { writeCredentials, renameAccount, clearCredentials } from '../cli/profile.js'
 import { createApiService } from './api.service.js'
-import { BASE_API_URL } from '../config.js'
+import { API_URL, toApiOrigin } from '../config.js'
 import { logger } from '../logger.js'
 
 interface LoginOptions {
@@ -11,7 +11,7 @@ interface LoginOptions {
 }
 
 async function getOAuthParams(baseUrl: string) {
-  const response = await fetch(`${baseUrl}/.well-known/oauth-authorization-server`)
+  const response = await fetch(`${toApiOrigin(baseUrl)}/.well-known/oauth-authorization-server`)
   if (!response.ok) {
     throw new Error(`Failed to fetch OAuth configuration: ${response.status} ${response.statusText}`)
   }
@@ -25,7 +25,7 @@ async function getOAuthParams(baseUrl: string) {
 }
 
 export async function login(opts: LoginOptions = {}): Promise<void> {
-  const baseUrl = opts.url || BASE_API_URL
+  const baseUrl = opts.url || API_URL
   const profileName = opts.profileName || 'default'
   const oauthManager = new OAuthManager(profileName)
 

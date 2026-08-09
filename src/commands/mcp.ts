@@ -5,7 +5,7 @@ import fs from 'fs'
 import path from 'path'
 import jwt from 'jsonwebtoken'
 import * as API from '../services/version-api.service.js'
-import { API_URL } from '../config.js'
+import { API_URL, toApiBase } from '../config.js'
 import { getAuthHeaders } from '../lib/authHeaders.js'
 
 interface JwtPayload {
@@ -148,7 +148,7 @@ export async function startMcpServer(): Promise<void> {
     },
   )
 
-  const baseUrl = process.env.MULTIPLAYER_URL || API_URL
+  const radarBase = toApiBase(process.env.MULTIPLAYER_URL || API_URL)
   const debugSessionId = z.string().describe('The debug session ID')
 
   server.registerTool(
@@ -160,7 +160,7 @@ export async function startMcpServer(): Promise<void> {
     async ({ debugSessionId: id }) => {
       const apiKey = requireApiKey()
       const { workspace, project } = decodeJwt(apiKey)
-      const url = new URL(`${baseUrl}/v0/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/otel-traces`)
+      const url = new URL(`${radarBase}/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/otel-traces`)
       url.searchParams.set('skip', '0')
       url.searchParams.set('limit', '300')
       const res = await fetch(url.toString(), { headers: getAuthHeaders(apiKey) })
@@ -178,7 +178,7 @@ export async function startMcpServer(): Promise<void> {
     async ({ debugSessionId: id }) => {
       const apiKey = requireApiKey()
       const { workspace, project } = decodeJwt(apiKey)
-      const url = new URL(`${baseUrl}/v0/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/otel-logs`)
+      const url = new URL(`${radarBase}/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/otel-logs`)
       url.searchParams.set('skip', '0')
       url.searchParams.set('limit', '300')
       const res = await fetch(url.toString(), { headers: getAuthHeaders(apiKey) })
@@ -196,7 +196,7 @@ export async function startMcpServer(): Promise<void> {
     async ({ debugSessionId: id }) => {
       const apiKey = requireApiKey()
       const { workspace, project } = decodeJwt(apiKey)
-      const url = new URL(`${baseUrl}/v0/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/session-notes/context`)
+      const url = new URL(`${radarBase}/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/session-notes/context`)
       const res = await fetch(url.toString(), { headers: getAuthHeaders(apiKey) })
       const data = res.ok ? await res.json() : { error: `${res.status} ${res.statusText}` }
       return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] }
@@ -212,7 +212,7 @@ export async function startMcpServer(): Promise<void> {
     async ({ debugSessionId: id }) => {
       const apiKey = requireApiKey()
       const { workspace, project } = decodeJwt(apiKey)
-      const url = new URL(`${baseUrl}/v0/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/rrweb-events`)
+      const url = new URL(`${radarBase}/radar/workspaces/${workspace}/projects/${project}/debug-sessions/${id}/rrweb-events`)
       url.searchParams.set('limit', '5000')
       const res = await fetch(url.toString(), { headers: getAuthHeaders(apiKey) })
       const data = res.ok ? await res.json() : { error: `${res.status} ${res.statusText}` }

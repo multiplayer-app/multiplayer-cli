@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process'
 import { AgentConfig } from '../types/index.js'
 import { getRemoteUrl, getDefaultBranch } from './git.service.js'
+import { toApiBase } from '../config.js'
 
 export type GitPlatform = 'github' | 'gitlab' | 'bitbucket'
 
@@ -91,16 +92,17 @@ export const createPrViaApi = async (
 ): Promise<string | null> => {
   if (!config.workspace || !config.project) return null
   try {
-    const base = config.url.replace(/\/$/, '')
+    const base = toApiBase(config.url)
+    const { repositoryUrl, branchName, baseBranch, title, body: description } = params
     const res = await fetch(
-      `${base}/v0/radar/workspaces/${config.workspace}/projects/${config.project}/pull-request`,
+      `${base}/api/git/workspaces/${config.workspace}/projects/${config.project}/git-repositories/git/pull-request`,
       {
         method: 'POST',
         headers: {
           'x-api-key': config.apiKey,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(params),
+        body: JSON.stringify({ repositoryUrl, branchName, baseBranch, title, description }),
       },
     )
 

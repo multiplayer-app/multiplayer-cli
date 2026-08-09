@@ -1,7 +1,7 @@
-import { URL } from 'url'
 import type { AgentConfig } from '../types/index.js'
 import { getAuthHeaders } from '../lib/authHeaders.js'
 import { AuthError, AUTH_STATUS_CODES } from '../lib/authError.js'
+import { toApiBase } from '../config.js'
 
 /** Subset of GET /v0/api/workspaces/:workspaceId */
 export interface ApiWorkspace {
@@ -15,7 +15,7 @@ export interface ApiProject {
   _id: string
 }
 
-/** Response from POST /v0/git/workspaces/:workspaceId/integrations */
+/** Response from POST /v0/api/git/workspaces/:workspaceId/integrations */
 export interface ApiIntegration {
   _id: string
   workspace: string
@@ -58,8 +58,7 @@ export const createApiService = (
 ): MultiplayerApiService & {
   fetchUserSession: () => Promise<UserSession>
 } => {
-  const host = new URL(config.url).origin
-  const apiBase = `${host}/v0`
+  const apiBase = toApiBase(config.url)
   const headers: Record<string, string> = config.bearerToken
     ? { Authorization: `Bearer ${config.bearerToken}` }
     : getAuthHeaders(config.apiKey)
@@ -93,7 +92,7 @@ export const createApiService = (
   }
 
   const fetchUserSession = async (): Promise<UserSession> => {
-    const res = await fetch(`${apiBase}/auth/user-session`, { headers })
+    const res = await fetch(`${apiBase}/api/auth/user-session`, { headers })
     throwIfAuthFailure(res, 'Failed to fetch user session')
     if (!res.ok) throw new Error(`Failed to fetch user session: ${res.status} ${res.statusText}`)
     const data = (await res.json()) as any
@@ -105,7 +104,7 @@ export const createApiService = (
   }
 
   const createIntegration = async (workspaceId: string, projectId: string, name: string): Promise<ApiIntegration> => {
-    const res = await fetch(`${apiBase}/git/workspaces/${workspaceId}/integrations`, {
+    const res = await fetch(`${apiBase}/api/git/workspaces/${workspaceId}/integrations`, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, project: projectId, type: 'OTEL' }),

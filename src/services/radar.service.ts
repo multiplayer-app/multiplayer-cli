@@ -1,6 +1,5 @@
 import { io, Socket } from 'socket.io-client'
 import jwt from 'jsonwebtoken'
-import { URL } from 'url'
 import { createApiService } from './api.service.js'
 import { fetchAnthropicModels, FALLBACK_ANTHROPIC_MODELS } from './ai.service.js'
 import { getAuthHeaders, isOAuthToken } from '../lib/authHeaders.js'
@@ -33,6 +32,8 @@ import {
   EVENT_AGENT_CHAT_BULK_DELETE,
   EVENT_AGENT_CHAT_DELETE,
   EVENT_DEBUGGING_AGENT_UPDATE,
+  toApiOrigin,
+  toApiBase,
 } from '../config.js'
 
 /**
@@ -162,9 +163,8 @@ const computeAvailableModels = async (config: AgentConfig): Promise<string[]> =>
 }
 
 export const createRadarService = (config: AgentConfig, logger: Logger, getToken?: () => Promise<string>): RadarService => {
-  // URL.origin never has a trailing slash, so we use it directly as the API base
-  const host = new URL(config.url).origin
-  const apiBase = `${host}/v0/radar`
+  const host = toApiOrigin(config.url)
+  const apiBase = `${toApiBase(config.url)}/radar`
 
   /** Build a fully-qualified project-scoped API URL. */
   const projectUrl = (workspaceId: string, projectId: string, path: string) =>
@@ -237,7 +237,9 @@ export const createRadarService = (config: AgentConfig, logger: Logger, getToken
   }
 
   const socket: Socket = io(`${host}/workspaces/${config.workspace}/projects/${config.project}/agents`, {
-    path: '/v0/radar/ws',
+    // Socket.IO's `path` option is the URL path portion only (no origin), so derive
+    // it from apiBase rather than duplicating the "/radar" route segment here.
+    path: `${new URL(apiBase).pathname}/ws`,
     // Use a function (not a static object) so auth data is built fresh for every
     // connection attempt, including reconnects.  This allows the token to be
     // refreshed before it is sent, preventing "Authorization failed" errors when
